@@ -16,7 +16,7 @@
  * ```
  */
 
-export { GRADE_BANDS, gradeFor, scoreAudit } from './scorer.js';
+export { GRADE_BANDS, describeGrade, gradeFor, scoreAudit } from './scorer.js';
 export {
   BENCHMARK_CONSTANTS,
   computeFrictionTax,

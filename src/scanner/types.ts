@@ -7,6 +7,10 @@
  * serialisation of an {@link AuditReport} is stable and diffable across runs.
  */
 
+import type { Grade } from '../shared/grade.js';
+
+export type { Grade } from '../shared/grade.js';
+
 /** Schema version of {@link AgentAuditRawData}. Bump on any breaking change. */
 export const AUDIT_SCHEMA_VERSION = '1.0.0' as const;
 export type AuditSchemaVersion = typeof AUDIT_SCHEMA_VERSION;
@@ -400,8 +404,11 @@ export interface ScanSummary {
   hasLlmsTxt: boolean;
   /** 0–100 composite readiness score. */
   agentReadinessScore: number;
-  /** Letter grade derived from {@link agentReadinessScore}. */
-  grade: 'A' | 'B' | 'C' | 'D' | 'F';
+  /**
+   * Letter grade derived from {@link agentReadinessScore}, on the shared
+   * {@link Grade} scale — the same bands the Phase 2 scorecard uses.
+   */
+  grade: Grade;
   /** Total interactive controls catalogued on the page. */
   interactiveControlCount: number;
   /** Wall-clock duration of the whole scan. */

@@ -12,6 +12,7 @@
  */
 
 import type { AgentAuditRawData } from '../scanner/types.js';
+import { gradeFor } from '../shared/grade.js';
 import {
   assessSchema,
   classifyToolByLanguage,
@@ -31,7 +32,6 @@ import {
   SCORECARD_SCHEMA_VERSION,
   type AgentScorecard,
   type AuditIssue,
-  type Grade,
   type IssueSeverity,
   type PillarId,
   type PillarScore,
@@ -44,26 +44,9 @@ import {
 /* Grade mapping                                                               */
 /* -------------------------------------------------------------------------- */
 
-/** Lower bound of each grade band, highest first. */
-export const GRADE_BANDS: ReadonlyArray<{ grade: Grade; min: number }> = [
-  { grade: 'A', min: 90 },
-  { grade: 'B', min: 80 },
-  { grade: 'C', min: 70 },
-  { grade: 'D', min: 60 },
-  { grade: 'F', min: 0 },
-];
-
-/**
- * Maps a 0–100 score to its letter grade.
- * A: 90–100, B: 80–89, C: 70–79, D: 60–69, F: below 60.
- */
-export function gradeFor(score: number): Grade {
-  const bounded = clamp(score, 0, 100);
-  for (const band of GRADE_BANDS) {
-    if (bounded >= band.min) return band.grade;
-  }
-  return 'F';
-}
+// Grading lives in `src/shared/grade.ts` so the scanner summary and this
+// scorecard cannot drift apart. Re-exported here for callers of the evals API.
+export { GRADE_BANDS, gradeFor, describeGrade } from '../shared/grade.js';
 
 /* -------------------------------------------------------------------------- */
 /* Public API                                                                  */

@@ -96,10 +96,46 @@ export function round(value: number, digits = 2): number {
 /** Whether a tool reads state or changes it. */
 export type ToolKind = 'query' | 'mutation' | 'unknown';
 
+/**
+ * Verb vocabulary for classifying tools.
+ *
+ * Three passes, because the signals are not equally reliable:
+ *
+ *  1. **Leading verb of the name.** Tool names are conventionally `verb_noun`,
+ *     so the first word is the strongest signal there is. This pass exists
+ *     because `get_order_status` is a query whose *name* contains "order".
+ *  2. **Anywhere in the name.** Catches `start_return`, `cart_add`.
+ *  3. **The description.** Weakest, and scanned with a narrower vocabulary:
+ *     "return", "order", "post", "set" and "apply" are so common in ordinary
+ *     prose ("returns the matching issues", "in order to") that matching them
+ *     in a description produces more false mutations than true ones.
+ */
+const LEADING_MUTATION_VERBS = new Set([
+  'add', 'create', 'update', 'delete', 'remove', 'place', 'submit', 'buy', 'purchase',
+  'checkout', 'pay', 'book', 'cancel', 'subscribe', 'register', 'apply', 'set', 'send',
+  'post', 'transfer', 'refund', 'save', 'edit', 'upload', 'schedule', 'order',
+]);
+
+const LEADING_QUERY_VERBS = new Set([
+  'get', 'list', 'search', 'find', 'read', 'fetch', 'lookup', 'query', 'show', 'view',
+  'browse', 'check', 'track', 'describe', 'inspect', 'quote', 'calculate', 'filter',
+  'select', 'export', 'preview', 'compare', 'estimate', 'count', 'resolve', 'summarize',
+]);
+
 const MUTATION_VERBS =
   /\b(add|create|update|delete|remove|place|submit|buy|purchase|checkout|pay|order|book|cancel|subscribe|register|sign[_\s-]?up|apply|set|send|post|transfer|refund|return)\b/i;
+
+/** Description vocabulary: the prose-colliding verbs are deliberately absent. */
+const MUTATION_VERBS_IN_PROSE =
+  /\b(add|create|update|delete|remove|place|submit|buy|purchase|checkout|pay|book|cancel|subscribe|sign[_\s-]?up|send|transfer|refund)\b/i;
+
 const QUERY_VERBS =
-  /\b(get|list|search|find|read|fetch|lookup|look[_\s-]?up|query|show|view|browse|check|track|status|describe|inspect|quote|calculate)\b/i;
+  /\b(get|list|search|find|read|fetch|lookup|look[_\s-]?up|query|show|view|browse|check|track|status|describe|inspect|quote|calculate|filter|select|export|preview)\b/i;
+
+/** The leading word of a tool name, lowercased. */
+function leadingVerb(name: string): string {
+  return (name.replace(/[_-]+/g, ' ').trim().split(/\s+/)[0] ?? '').toLowerCase();
+}
 
 /**
  * Classifies a tool as a query or a mutation from its name, description, and
@@ -111,14 +147,20 @@ export function classifyTool(tool: RegisteredTool): ToolKind {
   if (readOnlyHint === false) return 'mutation';
   if (tool.annotations['destructiveHint'] === true) return 'mutation';
 
-  // Names are the stronger signal: `search_products` is a query even when the
-  // description happens to mention adding items to a cart.
-  const name = tool.name.replace(/[_-]+/g, ' ');
+  return classifyByVerbs(tool.name, tool.description ?? '');
+}
+
+/** The three-pass verb classification shared by both entry points. */
+function classifyByVerbs(rawName: string, description: string): ToolKind {
+  const leading = leadingVerb(rawName);
+  if (LEADING_MUTATION_VERBS.has(leading)) return 'mutation';
+  if (LEADING_QUERY_VERBS.has(leading)) return 'query';
+
+  const name = rawName.replace(/[_-]+/g, ' ');
   if (MUTATION_VERBS.test(name)) return 'mutation';
   if (QUERY_VERBS.test(name)) return 'query';
 
-  const description = tool.description ?? '';
-  if (MUTATION_VERBS.test(description)) return 'mutation';
+  if (MUTATION_VERBS_IN_PROSE.test(description)) return 'mutation';
   if (QUERY_VERBS.test(description)) return 'query';
   return 'unknown';
 }
@@ -129,13 +171,7 @@ export function classifyTool(tool: RegisteredTool): ToolKind {
  * `readOnlyHint: true` sitting on something called `place_order`.
  */
 export function classifyToolByLanguage(tool: RegisteredTool): ToolKind {
-  const name = tool.name.replace(/[_-]+/g, ' ');
-  if (MUTATION_VERBS.test(name)) return 'mutation';
-  if (QUERY_VERBS.test(name)) return 'query';
-  const description = tool.description ?? '';
-  if (MUTATION_VERBS.test(description)) return 'mutation';
-  if (QUERY_VERBS.test(description)) return 'query';
-  return 'unknown';
+  return classifyByVerbs(tool.name, tool.description ?? '');
 }
 
 /** True when a tool is safe to invoke during an audit without side effects. */

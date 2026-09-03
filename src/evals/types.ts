@@ -9,6 +9,7 @@
  */
 
 import type { AgentAuditRawData, JsonValue, RegisteredTool } from '../scanner/types.js';
+import type { Grade } from '../shared/grade.js';
 
 /** Schema version of {@link AgentScorecard}. Bump on any breaking change. */
 export const SCORECARD_SCHEMA_VERSION = '1.0.0' as const;
@@ -79,8 +80,7 @@ export interface PillarScore {
   issueIds: string[];
 }
 
-/** Letter grade bands. A: 90–100, B: 80–89, C: 70–79, D: 60–69, F: <60. */
-export type Grade = 'A' | 'B' | 'C' | 'D' | 'F';
+export type { Grade } from '../shared/grade.js';
 
 /* -------------------------------------------------------------------------- */
 /* Issues                                                                      */

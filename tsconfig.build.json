@@ -4,7 +4,12 @@
     "rootDir": "src",
     "outDir": "dist",
     "module": "NodeNext",
-    "moduleResolution": "NodeNext"
+    "moduleResolution": "NodeNext",
+    "noEmit": false,
+    "declaration": true,
+    "sourceMap": true,
+    "incremental": false,
+    "plugins": []
   },
   "include": ["src/**/*.ts"]
 }

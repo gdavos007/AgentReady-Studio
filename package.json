@@ -20,17 +20,29 @@
       "default": "./dist/evals/index.js"
     }
   },
-  "files": ["dist", "README.md"],
-  "engines": { "node": ">=20" },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "scan": "tsx src/scanner/cli.ts"
+    "scan": "tsx src/scanner/cli.ts",
+    "dev": "next dev",
+    "start": "next start",
+    "build:web": "next build"
   },
   "dependencies": {
-    "playwright": "1.56.1"
+    "lucide-react": "^1.40.0",
+    "next": "^15.5.25",
+    "playwright": "1.56.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "peerDependencies": {
     "@ai-sdk/anthropic": "*",
@@ -38,12 +50,28 @@
     "ai": "*"
   },
   "peerDependenciesMeta": {
-    "ai": { "optional": true },
-    "@ai-sdk/anthropic": { "optional": true },
-    "@anthropic-ai/sdk": { "optional": true }
+    "ai": {
+      "optional": true
+    },
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@anthropic-ai/sdk": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^22.10.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.0.1",
+    "tailwindcss": "^4.3.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

@@ -1,0 +1,83 @@
+@import 'tailwindcss';
+
+/**
+ * AgentGrade Studio — design tokens.
+ *
+ * A high-density developer surface: near-black ground, one accent, and colour
+ * reserved for meaning (grade bands and issue severity). Everything else is
+ * greyscale so the numbers carry the emphasis.
+ */
+@theme {
+  --color-ground: #08090a;
+  --color-panel: #0e0f11;
+  --color-panel-raised: #141517;
+  --color-line: #1e1f23;
+  --color-line-bright: #2a2c31;
+
+  --color-ink: #edeef0;
+  --color-ink-muted: #9497a1;
+  --color-ink-faint: #6a6d77;
+
+  --color-accent: #5e6ad2;
+  --color-accent-bright: #7c87e8;
+
+  --color-grade-a: #4ade80;
+  --color-grade-b: #a3e635;
+  --color-grade-c: #fbbf24;
+  --color-grade-d: #fb923c;
+  --color-grade-f: #f87171;
+
+  --color-critical: #f87171;
+  --color-warning: #fbbf24;
+  --color-info: #60a5fa;
+
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin, unobtrusive scrollbars — the studio is a dense, scrolling surface. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-bright) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-line-bright);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Syntax highlighting classes emitted by src/lib/highlight.ts. */
+.tok-plain { color: var(--color-ink); }
+.tok-comment { color: #5f6470; font-style: italic; }
+.tok-string { color: #9ece6a; }
+.tok-number { color: #ff9e64; }
+.tok-keyword { color: #bb9af7; }
+.tok-literal { color: #ff9e64; }
+.tok-punctuation { color: #787c99; }
+.tok-tag { color: #7aa2f7; }
+.tok-attribute { color: #bb9af7; }
+.tok-property { color: #7dcfff; }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -347,6 +347,30 @@ describe('scoreAudit — edge cases', () => {
     expect(deducted).toBeCloseTo(100 - scorecard.overallScoreExact, 3);
   });
 
+  it('does not mistake a query tool for a mutation because of its prose', () => {
+    // "return the matching items" and "order status" are prose, not intent —
+    // matching them made read-only query tools look mislabelled.
+    const queries = [
+      makeTool({ name: 'get_order_status', description: 'Return the fulfilment status of an order.' }),
+      makeTool({ name: 'filter_issues', description: 'Filter findings and return the matches.' }),
+      makeTool({ name: 'track_order', description: 'Look up the delivery status of an order.' }),
+    ];
+    for (const tool of queries) expect(classifyToolByLanguage(tool), tool.name).toBe('query');
+
+    // A genuine returns flow is still a mutation.
+    expect(
+      classifyToolByLanguage(
+        makeTool({ name: 'start_return', description: 'Open a return request for a delivered line.' }),
+      ),
+    ).toBe('mutation');
+
+    const scorecard = scoreAudit(
+      makeAuditData({ tools: queries, forms: [makeForm({ id: 'form-1', category: 'search' })] }),
+      { now: FIXED_CLOCK },
+    );
+    expect(scorecard.issues.some((issue) => issue.id === 'safety.mislabelled-read-only-tools')).toBe(false);
+  });
+
   it('flags a tool mislabelled as read-only', () => {
     const data = makeAuditData({
       tools: [makeTool({ name: 'place_order', annotations: { readOnlyHint: true } })],

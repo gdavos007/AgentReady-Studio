@@ -35,3 +35,4 @@ export {
   type ValidationResult,
 } from './validation.js';
 export * from './types.js';
+export { GRADES, GRADE_BANDS, describeGrade, gradeFor, type Grade } from '../shared/grade.js';

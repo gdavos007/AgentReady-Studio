@@ -12,6 +12,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+
+import { gradeFor } from '../shared/grade.js';
 import { chromium, type Browser, type BrowserContext, type Page, type Response } from 'playwright';
 
 import {
@@ -830,8 +832,9 @@ function summarise(input: SummaryInput): ScanSummary {
   );
   score = Math.max(0, Math.min(100, score - penalty));
 
-  const grade: ScanSummary['grade'] =
-    score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 40 ? 'D' : 'F';
+  // Graded on the shared scale so the CLI, the API, and the studio never
+  // disagree about what a "B" means.
+  const grade = gradeFor(score);
 
   return {
     totalTools: input.tools.length,
