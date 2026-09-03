@@ -1,0 +1,949 @@
+/**
+ * AgentGrade — core inspection engine.
+ *
+ * Drives a headless Chromium session (with a CDP session attached), runs the
+ * in-page inspector, probes the well-known agent descriptors, and assembles a
+ * strictly-shaped {@link AuditReport}.
+ *
+ * The engine is defensive by construction: no single failing stage aborts the
+ * scan. Recoverable problems are recorded as {@link ScanDiagnostic}s and the
+ * report is downgraded to `partial`; only a completely unusable page yields
+ * `failed`.
+ */
+
+import { randomUUID } from 'node:crypto';
+import { chromium, type Browser, type BrowserContext, type Page, type Response } from 'playwright';
+
+import {
+  mergeTags,
+  probeAllDescriptors,
+  scanStaticHtmlForToolTags,
+  toolsFromDescriptors,
+  toolsFromTags,
+  type FetchLike,
+} from './declarative-discovery.js';
+import {
+  EVALUATION_HELPER_SHIM,
+  MODEL_CONTEXT_READY_EXPRESSION,
+  STEALTH_INIT_SCRIPT,
+  inspectAgentSurface,
+} from './dom-inspector.js';
+import {
+  AUDIT_SCHEMA_VERSION,
+  type AgentAuditRawData,
+  type AuditReport,
+  type AuditStatus,
+  type DeclarativeToolTag,
+  type DescriptorProbe,
+  type DiscoveredForm,
+  type DomInspectionResult,
+  type FrictionTrap,
+  type FrictionTrapType,
+  type ModelContextProbe,
+  type NavigationOutcome,
+  type NavigationStatus,
+  type PageMetadata,
+  type RegisteredTool,
+  type RuntimeWebMcpState,
+  type ScanDiagnostic,
+  type ScanSummary,
+  type ScannerOptions,
+  type TrapSeverity,
+} from './types.js';
+
+/* -------------------------------------------------------------------------- */
+/* Defaults                                                                    */
+/* -------------------------------------------------------------------------- */
+
+/** Resolved defaults for every {@link ScannerOptions} field. */
+export const DEFAULT_OPTIONS = {
+  totalTimeoutMs: 60_000,
+  navigationTimeoutMs: 30_000,
+  networkIdleTimeoutMs: 5_000,
+  modelContextTimeoutMs: 3_000,
+  descriptorTimeoutMs: 8_000,
+  headless: true,
+  userAgent:
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  viewport: { width: 1440, height: 900 },
+  locale: 'en-US',
+  timezoneId: 'America/New_York',
+  skipDescriptors: false,
+  enableCdp: true,
+} as const;
+
+/**
+ * Header set that keeps well-behaved bot walls from serving an interstitial.
+ * These mirror what a real Chrome sends; nothing here forges identity.
+ */
+const DEFAULT_HEADERS: Record<string, string> = {
+  'accept-language': 'en-US,en;q=0.9',
+  accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'sec-ch-ua': '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"macOS"',
+  'sec-fetch-dest': 'document',
+  'sec-fetch-mode': 'navigate',
+  'sec-fetch-site': 'none',
+  'sec-fetch-user': '?1',
+  'upgrade-insecure-requests': '1',
+};
+
+/** Chromium flags that remove the most obvious automation fingerprints. */
+const LAUNCH_ARGS = [
+  '--disable-blink-features=AutomationControlled',
+  '--disable-dev-shm-usage',
+  '--no-sandbox',
+  '--disable-features=IsolateOrigins,site-per-process',
+  '--disable-background-timer-throttling',
+  '--disable-renderer-backgrounding',
+];
+
+/** Text signatures that indicate a bot wall or consent interstitial. */
+const BOT_WALL_PATTERNS: ReadonlyArray<{ signal: string; pattern: RegExp }> = [
+  { signal: 'captcha', pattern: /\bcaptcha\b/i },
+  { signal: 'recaptcha', pattern: /recaptcha/i },
+  { signal: 'hcaptcha', pattern: /hcaptcha/i },
+  { signal: 'cloudflare-challenge', pattern: /checking your browser|cf-browser-verification|cf-challenge/i },
+  { signal: 'human-verification', pattern: /verify (?:you are|you're) (?:a )?human|are you a robot/i },
+  { signal: 'access-denied', pattern: /access denied|request blocked|you have been blocked/i },
+  { signal: 'unusual-traffic', pattern: /unusual traffic|automated queries/i },
+];
+
+/* -------------------------------------------------------------------------- */
+/* Small utilities                                                             */
+/* -------------------------------------------------------------------------- */
+
+const nowIso = (): string => new Date().toISOString();
+
+const isTimeoutError = (error: unknown): boolean =>
+  error instanceof Error && (error.name === 'TimeoutError' || /timeout/i.test(error.message));
+
+/** Rejects with a `TimeoutError`-shaped error if `promise` outlives `ms`. */
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`${label} exceeded ${ms}ms`);
+          error.name = 'TimeoutError';
+          reject(error);
+        }, ms);
+        if (typeof timer.unref === 'function') timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message.split('\n')[0] : String(error);
+
+/** Accumulates diagnostics and exposes the counters the summary needs. */
+class DiagnosticLog {
+  readonly entries: ScanDiagnostic[] = [];
+
+  constructor(private readonly sink?: (diagnostic: ScanDiagnostic) => void) {}
+
+  add(level: ScanDiagnostic['level'], stage: ScanDiagnostic['stage'], code: string, message: string): void {
+    const diagnostic: ScanDiagnostic = { level, stage, code, message: message.slice(0, 2000), at: nowIso() };
+    this.entries.push(diagnostic);
+    try {
+      this.sink?.(diagnostic);
+    } catch {
+      /* a broken sink must never fail the scan */
+    }
+  }
+
+  count(level: ScanDiagnostic['level']): number {
+    return this.entries.filter((entry) => entry.level === level).length;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Public API                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Audits a single URL and returns the raw inspection data.
+ *
+ * Never throws for page-level problems (bad DNS, 404s, bot walls, timeouts):
+ * those are reported through {@link AuditReport.status} and the diagnostics
+ * list. It only throws if Chromium itself cannot be launched.
+ */
+export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): Promise<AuditReport> {
+  const startedAtMs = Date.now();
+  const startedAt = nowIso();
+  const log = new DiagnosticLog(options.onDiagnostic);
+
+  const config = {
+    totalTimeoutMs: options.totalTimeoutMs ?? DEFAULT_OPTIONS.totalTimeoutMs,
+    navigationTimeoutMs: options.navigationTimeoutMs ?? DEFAULT_OPTIONS.navigationTimeoutMs,
+    networkIdleTimeoutMs: options.networkIdleTimeoutMs ?? DEFAULT_OPTIONS.networkIdleTimeoutMs,
+    modelContextTimeoutMs: options.modelContextTimeoutMs ?? DEFAULT_OPTIONS.modelContextTimeoutMs,
+    descriptorTimeoutMs: options.descriptorTimeoutMs ?? DEFAULT_OPTIONS.descriptorTimeoutMs,
+    headless: options.headless ?? DEFAULT_OPTIONS.headless,
+    userAgent: options.userAgent ?? DEFAULT_OPTIONS.userAgent,
+    viewport: options.viewport ?? { ...DEFAULT_OPTIONS.viewport },
+    locale: options.locale ?? DEFAULT_OPTIONS.locale,
+    timezoneId: options.timezoneId ?? DEFAULT_OPTIONS.timezoneId,
+    skipDescriptors: options.skipDescriptors ?? DEFAULT_OPTIONS.skipDescriptors,
+    enableCdp: options.enableCdp ?? DEFAULT_OPTIONS.enableCdp,
+    extraHttpHeaders: options.extraHttpHeaders ?? {},
+  };
+
+  const normalisedUrl = normaliseUrl(targetUrl);
+  if (!normalisedUrl.ok) {
+    log.add('error', 'navigate', 'invalid-url', normalisedUrl.error);
+    return failedReport({
+      requestedUrl: targetUrl,
+      origin: '',
+      startedAt,
+      startedAtMs,
+      userAgent: config.userAgent,
+      viewport: config.viewport,
+      log,
+      navigationError: normalisedUrl.error,
+      navigationStatus: 'network-error',
+    });
+  }
+
+  const url = normalisedUrl.url;
+  let browser: Browser | null = null;
+  let ownsBrowser = false;
+  let context: BrowserContext | null = null;
+  let page: Page | null = null;
+
+  try {
+    if (options.browser) {
+      browser = options.browser as unknown as Browser;
+    } else {
+      try {
+        browser = await chromium.launch({ headless: config.headless, args: [...LAUNCH_ARGS] });
+        ownsBrowser = true;
+      } catch (error) {
+        log.add('error', 'launch', 'browser-launch-failed', messageOf(error));
+        throw error;
+      }
+    }
+
+    context = await browser.newContext({
+      userAgent: config.userAgent,
+      viewport: { ...config.viewport },
+      locale: config.locale,
+      timezoneId: config.timezoneId,
+      ignoreHTTPSErrors: true,
+      javaScriptEnabled: true,
+      bypassCSP: true,
+      serviceWorkers: 'block',
+      extraHTTPHeaders: { ...DEFAULT_HEADERS, ...config.extraHttpHeaders },
+      ...(options.proxy ? { proxy: options.proxy } : {}),
+    });
+    context.setDefaultTimeout(config.navigationTimeoutMs);
+    context.setDefaultNavigationTimeout(config.navigationTimeoutMs);
+    await context.addInitScript(EVALUATION_HELPER_SHIM);
+    await context.addInitScript(STEALTH_INIT_SCRIPT);
+
+    page = await context.newPage();
+    const consoleErrors: string[] = [];
+    page.on('pageerror', (error) => {
+      if (consoleErrors.length < 20) consoleErrors.push(messageOf(error));
+    });
+
+    if (config.enableCdp) {
+      await attachCdpSession(context, page, log);
+    }
+
+    const elapsed = (): number => Date.now() - startedAtMs;
+    const remaining = (): number => Math.max(1_000, config.totalTimeoutMs - elapsed());
+
+    /* ---- Navigation --------------------------------------------------- */
+    const navigation = await navigate(page, url, config, log);
+
+    if (navigation.status === 'timeout-hard' || navigation.status === 'network-error') {
+      return failedReport({
+        requestedUrl: url,
+        origin: originOf(url),
+        startedAt,
+        startedAtMs,
+        userAgent: config.userAgent,
+        viewport: config.viewport,
+        log,
+        navigationError: navigation.error,
+        navigationStatus: navigation.status,
+        navigation,
+      });
+    }
+
+    for (const error of consoleErrors) {
+      log.add('info', 'navigate', 'page-error', error);
+    }
+
+    /* ---- Served HTML (for the static discovery pass) ------------------- */
+    let servedHtml = '';
+    try {
+      servedHtml = await withTimeout(page.content(), Math.min(10_000, remaining()), 'page.content()');
+    } catch (error) {
+      log.add('warning', 'dom', 'content-read-failed', messageOf(error));
+    }
+
+    /* ---- Runtime WebMCP settle wait ----------------------------------- */
+    const settleStart = Date.now();
+    let runtimeReady = false;
+    try {
+      await page.waitForFunction(MODEL_CONTEXT_READY_EXPRESSION, undefined, {
+        timeout: Math.min(config.modelContextTimeoutMs, remaining()),
+        polling: 100,
+      });
+      runtimeReady = true;
+    } catch (error) {
+      if (isTimeoutError(error)) {
+        log.add('info', 'runtime', 'model-context-absent', 'No WebMCP runtime registry appeared before the deadline.');
+      } else {
+        log.add('warning', 'runtime', 'model-context-probe-failed', messageOf(error));
+      }
+    }
+    const settleMs = Date.now() - settleStart;
+
+    /* ---- In-page inspection ------------------------------------------- */
+    let inspection: DomInspectionResult | null = null;
+    try {
+      inspection = await withTimeout(
+        page.evaluate(inspectAgentSurface),
+        Math.min(20_000, remaining()),
+        'DOM inspection',
+      );
+    } catch (error) {
+      log.add('error', 'dom', 'dom-inspection-failed', messageOf(error));
+    }
+
+    for (const error of inspection?.errors ?? []) {
+      log.add('warning', 'dom', 'dom-inspection-partial', error);
+    }
+
+    /* ---- Descriptor probing ------------------------------------------- */
+    const origin = originOf(navigation.finalUrl ?? url);
+    let descriptors: DescriptorProbe[] = [];
+    if (config.skipDescriptors) {
+      log.add('info', 'descriptors', 'descriptors-skipped', 'Descriptor probing disabled by options.');
+    } else {
+      try {
+        descriptors = await withTimeout(
+          probeAllDescriptors(context.request as unknown as FetchLike, origin, config.descriptorTimeoutMs),
+          Math.min(config.descriptorTimeoutMs * 3, remaining()),
+          'descriptor probing',
+        );
+      } catch (error) {
+        log.add('warning', 'descriptors', 'descriptor-probe-failed', messageOf(error));
+      }
+      for (const probe of descriptors) {
+        if (probe.error) {
+          log.add('info', 'descriptors', 'descriptor-unavailable', `${probe.url}: ${probe.error}`);
+        }
+      }
+    }
+
+    const data = assemble({
+      scanId: randomUUID(),
+      requestedUrl: url,
+      origin,
+      startedAt,
+      startedAtMs,
+      config,
+      navigation,
+      inspection,
+      descriptors,
+      servedHtml,
+      settleMs,
+      runtimeReady,
+      log,
+    });
+
+    return {
+      status: statusFor(data, log),
+      generatedAt: nowIso(),
+      durationMs: Date.now() - startedAtMs,
+      data,
+    };
+  } finally {
+    await closeQuietly(page, context, ownsBrowser ? browser : null, log);
+  }
+}
+
+/**
+ * Scans several URLs sequentially, reusing one Chromium instance. Sequential by
+ * design: parallel contexts distort the timing signals the audit relies on.
+ */
+export async function scanUrls(urls: string[], options: ScannerOptions = {}): Promise<AuditReport[]> {
+  if (urls.length === 0) return [];
+  if (options.browser) {
+    const reports: AuditReport[] = [];
+    for (const url of urls) reports.push(await scanUrl(url, options));
+    return reports;
+  }
+
+  const browser = await chromium.launch({ headless: options.headless ?? DEFAULT_OPTIONS.headless, args: [...LAUNCH_ARGS] });
+  try {
+    const reports: AuditReport[] = [];
+    for (const url of urls) {
+      reports.push(await scanUrl(url, { ...options, browser: browser as unknown as ScannerOptions['browser'] }));
+    }
+    return reports;
+  } finally {
+    await browser.close().catch(() => undefined);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Stages                                                                      */
+/* -------------------------------------------------------------------------- */
+
+function normaliseUrl(input: string): { ok: true; url: string } | { ok: false; error: string } {
+  const trimmed = (input ?? '').trim();
+  if (!trimmed) return { ok: false, error: 'Target URL is empty' };
+  const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    return { ok: false, error: `Target URL is not parseable: ${trimmed}` };
+  }
+  if (!['http:', 'https:', 'file:'].includes(parsed.protocol)) {
+    return { ok: false, error: `Unsupported protocol "${parsed.protocol}"` };
+  }
+  return { ok: true, url: parsed.toString() };
+}
+
+function originOf(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === 'null' ? `${parsed.protocol}//` : parsed.origin;
+  } catch {
+    return '';
+  }
+}
+
+/** Attaches a CDP session and cross-checks the WebMCP surface through it. */
+async function attachCdpSession(context: BrowserContext, page: Page, log: DiagnosticLog): Promise<void> {
+  try {
+    const session = await context.newCDPSession(page);
+    await session.send('Page.enable');
+    await session.send('Runtime.enable');
+    await session.send('Network.enable', {});
+    await session.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => undefined);
+
+    // Cross-check the registry through CDP so a page that tampers with the
+    // Playwright binding cannot hide its tools from the audit.
+    page.once('load', () => {
+      void session
+        .send('Runtime.evaluate', { expression: MODEL_CONTEXT_READY_EXPRESSION, returnByValue: true })
+        .then((result) => {
+          const detected = Boolean((result as { result?: { value?: unknown } }).result?.value);
+          log.add(
+            'info',
+            'runtime',
+            'cdp-model-context',
+            `CDP cross-check reports WebMCP registry ${detected ? 'present' : 'absent'}.`,
+          );
+        })
+        .catch((error: unknown) => {
+          log.add('info', 'runtime', 'cdp-evaluate-failed', messageOf(error));
+        });
+
+      void session
+        .send('Page.getFrameTree')
+        .then((tree) => {
+          const count = countFrames((tree as { frameTree?: CdpFrameTree }).frameTree);
+          log.add('info', 'dom', 'cdp-frame-tree', `CDP frame tree contains ${count} frame(s).`);
+        })
+        .catch(() => undefined);
+    });
+
+    log.add('info', 'launch', 'cdp-attached', 'Chrome DevTools Protocol session attached.');
+  } catch (error) {
+    log.add('warning', 'launch', 'cdp-attach-failed', messageOf(error));
+  }
+}
+
+interface CdpFrameTree {
+  childFrames?: CdpFrameTree[];
+}
+
+function countFrames(tree: CdpFrameTree | undefined): number {
+  if (!tree) return 0;
+  return 1 + (tree.childFrames ?? []).reduce((total, child) => total + countFrames(child), 0);
+}
+
+async function navigate(
+  page: Page,
+  url: string,
+  config: { navigationTimeoutMs: number; networkIdleTimeoutMs: number },
+  log: DiagnosticLog,
+): Promise<NavigationOutcome> {
+  const start = Date.now();
+  const outcome: NavigationOutcome = {
+    status: 'loaded',
+    requestedUrl: url,
+    finalUrl: null,
+    httpStatus: null,
+    title: null,
+    durationMs: 0,
+    redirectCount: 0,
+    botWallDetected: false,
+    botWallSignals: [],
+    error: null,
+  };
+
+  let response: Response | null = null;
+  try {
+    response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.navigationTimeoutMs });
+  } catch (error) {
+    outcome.durationMs = Date.now() - start;
+    outcome.error = messageOf(error);
+    if (isTimeoutError(error)) {
+      // The DOM may still be usable even though `goto` gave up.
+      // A hung navigation leaves `evaluate` waiting forever, so bound it.
+      const usable = await withTimeout(
+        page.evaluate(
+          () => document.readyState !== 'loading' && !!document.body && document.body.childElementCount > 0,
+        ),
+        2_000,
+        'post-timeout readiness probe',
+      ).catch(() => false);
+      outcome.status = usable ? 'timeout-soft' : 'timeout-hard';
+      log.add(
+        usable ? 'warning' : 'error',
+        'navigate',
+        usable ? 'navigation-timeout-recovered' : 'navigation-timeout',
+        outcome.error,
+      );
+      if (!usable) return outcome;
+    } else {
+      outcome.status = 'network-error';
+      log.add('error', 'navigate', 'navigation-failed', outcome.error);
+      return outcome;
+    }
+  }
+
+  if (response) {
+    outcome.httpStatus = response.status();
+    let redirect = response.request().redirectedFrom();
+    while (redirect && outcome.redirectCount < 20) {
+      outcome.redirectCount++;
+      redirect = redirect.redirectedFrom();
+    }
+  }
+
+  try {
+    await page.waitForLoadState('networkidle', { timeout: config.networkIdleTimeoutMs });
+  } catch (error) {
+    if (outcome.status === 'loaded') outcome.status = 'timeout-soft';
+    log.add(
+      'info',
+      'navigate',
+      'network-idle-timeout',
+      `Network never went idle within ${config.networkIdleTimeoutMs}ms; inspecting the page as-is.`,
+    );
+    void error;
+  }
+
+  outcome.finalUrl = page.url();
+  outcome.title = await page.title().catch(() => null);
+  outcome.durationMs = Date.now() - start;
+
+  const detection = await detectBotWall(page, outcome.httpStatus, outcome.title);
+  outcome.botWallDetected = detection.detected;
+  outcome.botWallSignals = detection.signals;
+  if (detection.detected) {
+    outcome.status = 'blocked';
+    log.add('warning', 'navigate', 'bot-wall-detected', `Bot wall signals: ${detection.signals.join(', ')}`);
+  } else if (outcome.httpStatus !== null && outcome.httpStatus >= 400) {
+    outcome.status = 'http-error';
+    log.add('warning', 'navigate', 'http-error', `Target responded with HTTP ${outcome.httpStatus}.`);
+  }
+
+  return outcome;
+}
+
+async function detectBotWall(
+  page: Page,
+  httpStatus: number | null,
+  title: string | null,
+): Promise<{ detected: boolean; signals: string[] }> {
+  const signals: string[] = [];
+  if (httpStatus === 403) signals.push('http-403');
+  if (httpStatus === 429) signals.push('http-429');
+
+  let sample = title ?? '';
+  try {
+    sample += ' ' + (await page.evaluate(() => (document.body ? (document.body.innerText || '').slice(0, 4000) : '')));
+    const challengeMarkers = await page.evaluate(() =>
+      [
+        '#cf-challenge-running',
+        '#challenge-form',
+        'iframe[src*="recaptcha"]',
+        'iframe[src*="hcaptcha"]',
+        '[data-sitekey]',
+        '#px-captcha',
+      ].filter((selector) => !!document.querySelector(selector)),
+    );
+    for (const marker of challengeMarkers) signals.push(`selector:${marker}`);
+  } catch {
+    /* an unreadable body is handled by the pattern pass below */
+  }
+
+  for (const { signal, pattern } of BOT_WALL_PATTERNS) {
+    if (pattern.test(sample)) signals.push(signal);
+  }
+
+  const unique = Array.from(new Set(signals));
+  // A bare 403 without any challenge markup is an authorisation failure, not a
+  // bot wall — do not mislabel it.
+  const detected = unique.some((signal) => !signal.startsWith('http-')) || unique.length > 1;
+  return { detected, signals: unique };
+}
+
+async function closeQuietly(
+  page: Page | null,
+  context: BrowserContext | null,
+  browser: Browser | null,
+  log: DiagnosticLog,
+): Promise<void> {
+  for (const [label, closer] of [
+    ['page', () => page?.close()],
+    ['context', () => context?.close()],
+    ['browser', () => browser?.close()],
+  ] as const) {
+    try {
+      await closer();
+    } catch (error) {
+      log.add('info', 'teardown', `${label}-close-failed`, messageOf(error));
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Assembly                                                                    */
+/* -------------------------------------------------------------------------- */
+
+interface AssembleInput {
+  scanId: string;
+  requestedUrl: string;
+  origin: string;
+  startedAt: string;
+  startedAtMs: number;
+  config: { userAgent: string; viewport: { width: number; height: number } };
+  navigation: NavigationOutcome;
+  inspection: DomInspectionResult | null;
+  descriptors: DescriptorProbe[];
+  servedHtml: string;
+  settleMs: number;
+  runtimeReady: boolean;
+  log: DiagnosticLog;
+}
+
+function assemble(input: AssembleInput): AgentAuditRawData {
+  const inspection = input.inspection;
+
+  const probes = inspection?.probes ?? [
+    emptyProbe('navigator.modelContext'),
+    emptyProbe('document.modelContext'),
+  ];
+  const runtimeTools = dedupeTools(probes.flatMap((probe) => probe.tools));
+  const runtime: RuntimeWebMcpState = {
+    detected: probes.some((probe) => probe.supportsRegistration || probe.tools.length > 0),
+    settleMs: input.settleMs,
+    probes,
+    tools: runtimeTools,
+  };
+
+  const staticTags = scanStaticHtmlForToolTags(input.servedHtml);
+  const tags: DeclarativeToolTag[] = mergeTags(inspection?.tags ?? [], staticTags);
+  const declarativeTools = dedupeTools([...toolsFromTags(tags), ...toolsFromDescriptors(input.descriptors)]);
+
+  const forms: DiscoveredForm[] = inspection?.forms ?? [];
+  const frictionTraps: FrictionTrap[] = inspection?.frictionTraps ?? [];
+  const tools = dedupeTools([...runtimeTools, ...declarativeTools]);
+
+  const summary = summarise({
+    tools,
+    runtimeTools,
+    declarativeTags: tags,
+    descriptors: input.descriptors,
+    forms,
+    frictionTraps,
+    controlCount: inspection?.controls.length ?? 0,
+    runtimeDetected: runtime.detected,
+    page: inspection?.page ?? emptyPageMetadata(),
+    scanDurationMs: Date.now() - input.startedAtMs,
+    warningCount: input.log.count('warning'),
+    errorCount: input.log.count('error'),
+  });
+
+  return {
+    schemaVersion: AUDIT_SCHEMA_VERSION,
+    scanId: input.scanId,
+    target: {
+      requestedUrl: input.requestedUrl,
+      origin: input.origin,
+      startedAt: input.startedAt,
+      finishedAt: nowIso(),
+      userAgent: input.config.userAgent,
+      viewport: { ...input.config.viewport },
+    },
+    navigation: input.navigation,
+    page: inspection?.page ?? emptyPageMetadata(),
+    runtime,
+    declarative: {
+      descriptors: input.descriptors,
+      tags,
+      tools: declarativeTools,
+      manifestLinks: inspection?.manifestLinks ?? [],
+    },
+    tools,
+    forms,
+    controls: inspection?.controls ?? [],
+    frictionTraps,
+    summary,
+    diagnostics: input.log.entries,
+  };
+}
+
+function emptyProbe(path: 'navigator.modelContext' | 'document.modelContext'): ModelContextProbe {
+  return {
+    path,
+    present: false,
+    valueType: null,
+    apiSurface: [],
+    supportsRegistration: false,
+    tools: [],
+    error: 'DOM inspection did not run',
+  };
+}
+
+function emptyPageMetadata(): PageMetadata {
+  return {
+    title: null,
+    lang: null,
+    description: null,
+    landmarkCount: 0,
+    hasSingleMainLandmark: false,
+    headingLevels: [],
+    domNodeCount: 0,
+    shadowRootCount: 0,
+    iframeCount: 0,
+    requiresJavaScript: false,
+  };
+}
+
+/** Keeps the first tool seen for each `id`, preferring executable runtime ones. */
+function dedupeTools(tools: RegisteredTool[]): RegisteredTool[] {
+  const byKey = new Map<string, RegisteredTool>();
+  for (const tool of tools) {
+    const key = tool.id;
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, tool);
+      continue;
+    }
+    // Prefer the richer record when the same tool is declared twice.
+    const existingScore = (existing.executable ? 2 : 0) + (existing.inputSchema.isStructured ? 1 : 0);
+    const candidateScore = (tool.executable ? 2 : 0) + (tool.inputSchema.isStructured ? 1 : 0);
+    if (candidateScore > existingScore) byKey.set(key, tool);
+  }
+  return Array.from(byKey.values());
+}
+
+interface SummaryInput {
+  tools: RegisteredTool[];
+  runtimeTools: RegisteredTool[];
+  declarativeTags: DeclarativeToolTag[];
+  descriptors: DescriptorProbe[];
+  forms: DiscoveredForm[];
+  frictionTraps: FrictionTrap[];
+  controlCount: number;
+  runtimeDetected: boolean;
+  page: PageMetadata;
+  scanDurationMs: number;
+  warningCount: number;
+  errorCount: number;
+}
+
+const CRITICAL_CATEGORIES = new Set(['checkout', 'authentication', 'signup', 'search']);
+const SEVERITY_WEIGHT: Record<TrapSeverity, number> = { critical: 8, high: 4, medium: 2, low: 1 };
+
+function summarise(input: SummaryInput): ScanSummary {
+  const trapsBySeverity: Record<TrapSeverity, number> = { low: 0, medium: 0, high: 0, critical: 0 };
+  const trapsByType: Partial<Record<FrictionTrapType, number>> = {};
+  for (const trap of input.frictionTraps) {
+    trapsBySeverity[trap.severity] = (trapsBySeverity[trap.severity] ?? 0) + 1;
+    trapsByType[trap.type] = (trapsByType[trap.type] ?? 0) + 1;
+  }
+
+  const manifestTools = input.tools.filter(
+    (tool) => tool.source === 'well-known-mcp' || tool.source === 'well-known-agent' || tool.source === 'llms-txt',
+  );
+  const declarativeTools = input.tools.filter(
+    (tool) => tool.source === 'declarative-element' || tool.source === 'declarative-form',
+  );
+  const runtimeToolCount = input.runtimeTools.length;
+  const toolsWithSchema = input.tools.filter((tool) => tool.inputSchema.isStructured).length;
+  const toolsWithDescription = input.tools.filter((tool) => !!tool.description).length;
+
+  const hasWellKnownManifest = input.descriptors.some(
+    (probe) => probe.found && (probe.kind === 'well-known-mcp' || probe.kind === 'well-known-agent'),
+  );
+  const hasLlmsTxt = input.descriptors.some((probe) => probe.found && probe.kind === 'llms-txt');
+
+  const criticalForms = input.forms.filter((form) => CRITICAL_CATEGORIES.has(form.category));
+  const fullyLabelled = input.forms.filter((form) => form.fullyLabelled);
+
+  /* Composite score: capability first, then quality, minus friction. */
+  let score = 0;
+  if (input.runtimeDetected) score += runtimeToolCount > 0 ? 40 : 15;
+  if (hasWellKnownManifest) score += 15;
+  if (hasLlmsTxt) score += 5;
+  if (declarativeTools.length > 0) score += 10;
+
+  if (input.tools.length > 0) {
+    score += Math.round(6 * (toolsWithDescription / input.tools.length));
+    score += Math.round(6 * (toolsWithSchema / input.tools.length));
+  }
+
+  if (input.forms.length > 0) {
+    score += Math.round(12 * (fullyLabelled.length / input.forms.length));
+  } else {
+    score += 6; // Nothing to mislabel.
+  }
+
+  if (input.page.hasSingleMainLandmark) score += 3;
+  if (input.page.landmarkCount >= 3) score += 2;
+  if (input.page.headingLevels.includes(1)) score += 2;
+  if (!input.page.requiresJavaScript) score += 3;
+
+  const penalty = Math.min(
+    45,
+    input.frictionTraps.reduce((total, trap) => total + SEVERITY_WEIGHT[trap.severity], 0),
+  );
+  score = Math.max(0, Math.min(100, score - penalty));
+
+  const grade: ScanSummary['grade'] =
+    score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 40 ? 'D' : 'F';
+
+  return {
+    totalTools: input.tools.length,
+    runtimeToolCount,
+    declarativeToolCount: declarativeTools.length,
+    manifestToolCount: manifestTools.length,
+    toolsWithSchema,
+    toolsWithDescription,
+    formCount: input.forms.length,
+    criticalFormCount: criticalForms.length,
+    fullyLabelledFormCount: fullyLabelled.length,
+    frictionTrapCount: input.frictionTraps.length,
+    trapsBySeverity,
+    trapsByType,
+    hasWebMcpRuntime: input.runtimeDetected,
+    hasWellKnownManifest,
+    hasLlmsTxt,
+    agentReadinessScore: score,
+    grade,
+    interactiveControlCount: input.controlCount,
+    scanDurationMs: input.scanDurationMs,
+    warningCount: input.warningCount,
+    errorCount: input.errorCount,
+  };
+}
+
+function statusFor(data: AgentAuditRawData, log: DiagnosticLog): AuditStatus {
+  if (data.navigation.status === 'timeout-hard' || data.navigation.status === 'network-error') return 'failed';
+  if (log.count('error') > 0) return 'partial';
+  if (data.navigation.status !== 'loaded') return 'partial';
+  if (log.count('warning') > 0) return 'partial';
+  return 'ok';
+}
+
+/* -------------------------------------------------------------------------- */
+/* Failure path                                                                */
+/* -------------------------------------------------------------------------- */
+
+interface FailedReportInput {
+  requestedUrl: string;
+  origin: string;
+  startedAt: string;
+  startedAtMs: number;
+  userAgent: string;
+  viewport: { width: number; height: number };
+  log: DiagnosticLog;
+  navigationError: string | null;
+  navigationStatus: NavigationStatus;
+  navigation?: NavigationOutcome;
+}
+
+/** Builds a schema-valid report for a target that could not be inspected. */
+function failedReport(input: FailedReportInput): AuditReport {
+  const navigation: NavigationOutcome = input.navigation ?? {
+    status: input.navigationStatus,
+    requestedUrl: input.requestedUrl,
+    finalUrl: null,
+    httpStatus: null,
+    title: null,
+    durationMs: Date.now() - input.startedAtMs,
+    redirectCount: 0,
+    botWallDetected: false,
+    botWallSignals: [],
+    error: input.navigationError,
+  };
+
+  const page = emptyPageMetadata();
+  const summary = summarise({
+    tools: [],
+    runtimeTools: [],
+    declarativeTags: [],
+    descriptors: [],
+    forms: [],
+    frictionTraps: [],
+    controlCount: 0,
+    runtimeDetected: false,
+    page,
+    scanDurationMs: Date.now() - input.startedAtMs,
+    warningCount: input.log.count('warning'),
+    errorCount: input.log.count('error'),
+  });
+
+  return {
+    status: 'failed',
+    generatedAt: nowIso(),
+    durationMs: Date.now() - input.startedAtMs,
+    data: {
+      schemaVersion: AUDIT_SCHEMA_VERSION,
+      scanId: randomUUID(),
+      target: {
+        requestedUrl: input.requestedUrl,
+        origin: input.origin,
+        startedAt: input.startedAt,
+        finishedAt: nowIso(),
+        userAgent: input.userAgent,
+        viewport: { ...input.viewport },
+      },
+      navigation,
+      page,
+      runtime: {
+        detected: false,
+        settleMs: 0,
+        probes: [emptyProbe('navigator.modelContext'), emptyProbe('document.modelContext')],
+        tools: [],
+      },
+      declarative: { descriptors: [], tags: [], tools: [], manifestLinks: [] },
+      tools: [],
+      forms: [],
+      controls: [],
+      frictionTraps: [],
+      summary: { ...summary, agentReadinessScore: 0, grade: 'F' },
+      diagnostics: input.log.entries,
+    },
+  };
+}

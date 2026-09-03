@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="AgentGrade scanner fixture: a shop page with WebMCP tools and deliberate agent friction traps." />
+    <title>Nimbus Outfitters — Fixture Store</title>
+    <link rel="mcp-manifest" href="/.well-known/mcp" type="application/json" />
+    <link rel="agent-card" href="/.well-known/agent.json" type="application/json" />
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
+      header, main, nav, footer { display: block; }
+      .search-box { padding: 8px 0; }
+      .icon-btn { width: 40px; height: 40px; border: 1px solid #ccc; background: #fff; }
+      .checkout-panel { border: 1px solid #ddd; padding: 12px; margin: 16px 0; width: 640px; }
+      .outer-scroll { overflow-y: auto; height: 220px; border: 1px solid #eee; }
+      .inner-scroll { overflow-y: auto; height: 120px; border: 1px dashed #ccc; }
+      .tall { height: 900px; }
+      .wizard { display: flex; gap: 8px; margin-top: 12px; }
+      .step-btn { cursor: pointer; padding: 8px 14px; background: #eee; width: 90px; text-align: center; }
+      .iframe-host { width: 320px; height: 120px; background: #fafafa; }
+      .drag-item { cursor: grab; padding: 6px; width: 220px; list-style: none; }
+      iframe { width: 300px; height: 90px; }
+      checkout-widget { display: block; width: 260px; height: 72px; background: #f3f3f3; }
+      dialog { width: 360px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Nimbus Outfitters</h1>
+
+      <!-- Interactive surface: a search input that is NOT wrapped in a <form>. -->
+      <div class="search-box">
+        <label for="site-search">Search products</label>
+        <input type="search" id="site-search" name="q" placeholder="Search products" />
+        <button type="button" id="run-search">Search</button>
+      </div>
+
+      <!-- Friction trap: icon-only button with no accessible name. -->
+      <button class="icon-btn" id="cart-toggle">
+        <svg width="20" height="20" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8" fill="#555" /></svg>
+      </button>
+
+      <!-- Modal trigger surface. -->
+      <button type="button" aria-haspopup="dialog" data-modal-target="#help-dialog" id="open-help">Need help?</button>
+    </header>
+
+    <nav aria-label="Primary"><a href="/catalog">Catalog</a> · <a href="/orders">Orders</a></nav>
+
+    <main>
+      <h2>Checkout</h2>
+
+      <!-- Interactive surface: a checkout container that is not a <form>. -->
+      <section class="checkout-panel" id="checkout">
+        <h3>Order summary</h3>
+
+        <!-- Friction trap: input with no programmatic label at all. -->
+        <input type="text" name="coupon" id="coupon" />
+
+        <!-- Friction trap: placeholder used as the only label. -->
+        <input type="text" name="cardNumber" placeholder="Card number" autocomplete="cc-number" />
+
+        <!-- Friction trap: untitled payment iframe injected dynamically. -->
+        <iframe id="payment-frame" src="about:blank"></iframe>
+
+        <!-- Friction trap: empty embed container with no role or name. -->
+        <div class="iframe-host" data-iframe id="wallet-host"></div>
+
+        <!-- Friction trap: multi-step flow driven by non-semantic controls. -->
+        <div class="wizard" id="checkout-wizard">
+          <div class="step-btn" onclick="window.__step(-1)">Back</div>
+          <div class="step-btn" onclick="window.__step(1)">Next</div>
+          <div class="step-btn" onclick="window.__step(2)">Confirm</div>
+        </div>
+      </section>
+
+      <!-- Friction trap: nested scroll containers. -->
+      <div class="outer-scroll" id="outer-scroll">
+        <div class="inner-scroll" id="inner-scroll"><div class="tall">Long product list</div></div>
+        <div class="tall">More content</div>
+      </div>
+
+      <!-- Friction trap: pointer-only reordering. -->
+      <ul>
+        <li class="drag-item" draggable="true" id="drag-1">Reorder me</li>
+      </ul>
+
+      <!-- Friction trap: custom element with a closed shadow root. -->
+      <checkout-widget id="closed-widget"></checkout-widget>
+
+      <!-- Well-formed login form: fully labelled, should NOT raise label traps. -->
+      <form id="login" action="/session" method="post" aria-label="Sign in">
+        <label for="email">Email address</label>
+        <input type="email" id="email" name="email" autocomplete="email" required />
+        <label for="password">Password</label>
+        <input type="password" id="password" name="password" autocomplete="current-password" required />
+        <button type="submit">Sign in</button>
+      </form>
+
+      <!-- Declarative WebMCP annotation on a form. -->
+      <form
+        id="newsletter"
+        action="/subscribe"
+        method="post"
+        data-mcp-tool="subscribe_newsletter"
+        data-mcp-description="Subscribe an email address to the Nimbus newsletter."
+        data-mcp-schema='{"type":"object","properties":{"email":{"type":"string","format":"email"}},"required":["email"]}'
+      >
+        <label for="newsletter-email">Newsletter email</label>
+        <input type="email" id="newsletter-email" name="email" required />
+        <button type="submit">Subscribe</button>
+      </form>
+
+      <!-- Declarative WebMCP tool elements. -->
+      <tool-definition
+        name="track_order"
+        description="Look up the delivery status of an order by its confirmation number."
+        input-schema='{"type":"object","properties":{"orderId":{"type":"string"}},"required":["orderId"]}'
+      ></tool-definition>
+
+      <mcp-tool name="list_stores" description="List retail stores near a postal code.">
+        <script type="application/json">
+          { "type": "object", "properties": { "postalCode": { "type": "string" } }, "required": ["postalCode"] }
+        </script>
+      </mcp-tool>
+
+      <!-- Correctly titled iframe: must NOT be reported as a trap. -->
+      <iframe title="Customer support chat" src="/embed.html"></iframe>
+    </main>
+
+    <dialog id="help-dialog">
+      <form method="dialog" aria-label="Contact support">
+        <label for="help-message">Message</label>
+        <textarea id="help-message" name="message"></textarea>
+        <button type="submit">Send</button>
+      </form>
+    </dialog>
+
+    <footer><small>Fixture page for automated tests.</small></footer>
+
+    <script>
+      window.__step = function (delta) {
+        window.__currentStep = (window.__currentStep || 0) + delta;
+      };
+
+      // A closed shadow root — its contents are invisible to any agent.
+      class CheckoutWidget extends HTMLElement {
+        constructor() {
+          super();
+          const root = this.attachShadow({ mode: 'closed' });
+          root.innerHTML = '<button>Pay now</button>';
+        }
+      }
+      customElements.define('checkout-widget', CheckoutWidget);
+
+      // --- WebMCP runtime registry -------------------------------------
+      class MockModelContext {
+        constructor() {
+          this._tools = [];
+        }
+        registerTool(tool) {
+          this._tools.push(tool);
+          return { unregister: () => undefined };
+        }
+        provideContext(context) {
+          if (context && Array.isArray(context.tools)) this._tools.push(...context.tools);
+        }
+        getTools() {
+          return this._tools.slice();
+        }
+        get tools() {
+          return this._tools.slice();
+        }
+      }
+
+      navigator.modelContext = new MockModelContext();
+
+      navigator.modelContext.registerTool({
+        name: 'search_products',
+        description: 'Search the Nimbus catalog by free-text query.',
+        inputSchema: {
+          type: 'object',
+          properties: { query: { type: 'string' }, limit: { type: 'number' } },
+          required: ['query'],
+        },
+        annotations: { readOnlyHint: true },
+        async execute({ query }) {
+          return { content: [{ type: 'text', text: 'results for ' + query }] };
+        },
+      });
+
+      navigator.modelContext.registerTool({
+        name: 'add_to_cart',
+        description: 'Add a catalog item to the shopping cart.',
+        inputSchema: {
+          type: 'object',
+          properties: { sku: { type: 'string' }, quantity: { type: 'integer' } },
+          required: ['sku'],
+        },
+        annotations: { destructiveHint: false },
+        async execute({ sku }) {
+          return { content: [{ type: 'text', text: 'added ' + sku }] };
+        },
+      });
+
+      // Registered slightly later to exercise the settle wait.
+      setTimeout(function () {
+        navigator.modelContext.registerTool({
+          name: 'checkout',
+          description: 'Place the order for everything currently in the cart.',
+          inputSchema: {
+            type: 'object',
+            properties: { paymentToken: { type: 'string' } },
+            required: ['paymentToken'],
+          },
+          async execute() {
+            return { content: [{ type: 'text', text: 'ordered' }] };
+          },
+        });
+      }, 150);
+
+      // A second, legacy registry on `document`.
+      document.modelContext = {
+        tools: [
+          {
+            name: 'legacy_quote',
+            description: 'Legacy shipping quote endpoint.',
+            parameters: { type: 'object', properties: { postalCode: { type: 'string' } } },
+          },
+        ],
+      };
+    </script>
+  </body>
+</html>

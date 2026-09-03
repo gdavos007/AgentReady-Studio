@@ -1,0 +1,33 @@
+{
+  "name": "agentgrade-inspection-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AgentGrade core inspection engine: headless WebMCP / AI-agent readiness auditor.",
+  "type": "module",
+  "main": "dist/scanner/index.js",
+  "types": "dist/scanner/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/scanner/index.d.ts",
+      "default": "./dist/scanner/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "scan": "tsx src/scanner/cli.ts"
+  },
+  "dependencies": {
+    "playwright": "1.56.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
