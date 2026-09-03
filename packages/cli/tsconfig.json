@@ -1,7 +1,11 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
@@ -14,11 +18,20 @@
     "declaration": true,
     "sourceMap": true,
     "noEmit": true,
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "paths": {
-      "@agentgrade/core": ["../../src/index.ts"],
-      "@agentgrade/core/*": ["../../src/*"]
+      "@agentgrade/core": [
+        "../../src/index.ts"
+      ],
+      "@agentgrade/core/*": [
+        "../../src/*"
+      ]
     }
   },
-  "include": ["src/**/*.ts", "build.mjs"]
+  "include": [
+    "src/**/*.ts",
+    "build.mjs"
+  ]
 }

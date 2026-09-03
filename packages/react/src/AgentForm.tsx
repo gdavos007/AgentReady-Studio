@@ -181,7 +181,8 @@ export function inspectForm(
     const property = toCamelCase(name || id);
     if (!property || excluded.has(name) || excluded.has(property) || seen.has(property)) continue;
 
-    // Radio groups share a name and describe one value between them.
+    // Radio groups share a name and describe one value between them, so the
+    // group is one parameter whose options are the members' values.
     seen.add(property);
 
     fields.push({
@@ -189,18 +190,58 @@ export function inspectForm(
       name: name || id,
       tagName,
       type,
-      label: accessibleName(element, form),
+      label: type === 'radio' ? radioGroupLabel(form, name) : accessibleName(element, form),
       required: element.hasAttribute('required') || element.getAttribute('aria-required') === 'true',
-      options:
-        tagName === 'select'
-          ? Array.from((element as HTMLSelectElement).options)
-              .map((option) => option.value)
-              .filter((value) => value.length > 0)
-          : [],
+      options: collectOptions(element, form, tagName, type, name),
     });
   }
 
   return fields;
+}
+
+/** The selectable values a field offers: `<select>` options or a radio group. */
+function collectOptions(
+  element: HTMLElement,
+  form: HTMLFormElement,
+  tagName: string,
+  type: string,
+  name: string,
+): string[] {
+  if (tagName === 'select') {
+    return Array.from((element as HTMLSelectElement).options)
+      .map((option) => option.value)
+      .filter((value) => value.length > 0);
+  }
+
+  if (type === 'radio' && name) {
+    return Array.from(form.querySelectorAll<HTMLInputElement>(`input[type="radio"]`))
+      .filter((radio) => radio.getAttribute('name') === name)
+      .map((radio) => radio.value)
+      .filter((value) => value.length > 0);
+  }
+
+  return [];
+}
+
+/**
+ * Names a radio group.
+ *
+ * Each radio's own label names one *option*, not the choice being made, so the
+ * group's `<fieldset><legend>` is preferred when there is one.
+ */
+function radioGroupLabel(form: HTMLFormElement, name: string): string | null {
+  const first = form.querySelector<HTMLInputElement>(`input[type="radio"][name="${cssEscape(name)}"]`);
+  if (!first) return null;
+
+  const fieldset = first.closest('fieldset');
+  const legend = fieldset?.querySelector('legend');
+  if (legend?.textContent?.trim()) return collapse(legend.textContent);
+
+  const group = first.closest('[role="radiogroup"]');
+  const groupLabel = group?.getAttribute('aria-label');
+  if (groupLabel?.trim()) return collapse(groupLabel);
+
+  return null;
 }
 
 /**
@@ -258,6 +299,9 @@ function schemaTypeFor(field: DiscoveredField): { type: JsonSchemaProperty['type
       return { type: 'number' };
     case 'checkbox':
       return { type: 'boolean' };
+    case 'radio':
+      // One of the group's values; `enum` carries the choices.
+      return { type: 'string' };
     case 'password':
       return { type: 'string', format: 'password' };
     default:
@@ -314,6 +358,22 @@ function applyValues(
     if (!(field.property in values)) continue;
     const value = values[field.property];
     if (value === undefined) continue;
+
+    // A radio group is many elements and one value: select the member whose
+    // value matches. Writing `.value` on the first radio instead would leave
+    // the group unselected *and* corrupt that radio's own value.
+    if (field.type === 'radio') {
+      const chosen = Array.from(
+        form.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+      ).find((radio) => radio.getAttribute('name') === field.name && radio.value === String(value));
+      if (!chosen) continue;
+
+      setNativeChecked(chosen, true);
+      chosen.dispatchEvent(new Event('input', { bubbles: true }));
+      chosen.dispatchEvent(new Event('change', { bubbles: true }));
+      applied.push(field.property);
+      continue;
+    }
 
     const element = form.querySelector<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
       `[name="${cssEscape(field.name)}"], #${cssEscape(field.name)}`,

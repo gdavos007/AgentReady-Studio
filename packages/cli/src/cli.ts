@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * `agentgrade` — the command line interface.
  *
@@ -342,18 +341,13 @@ function isUsageError(error: unknown): boolean {
   return /is not a valid URL|Only http and https|A target URL is required/.test(message);
 }
 
-/** Entry point when executed as a binary. */
+/**
+ * Entry point for the binary. Sets `process.exitCode` rather than calling
+ * `process.exit`, so buffered stdout is flushed before the process ends.
+ *
+ * Nothing here runs on import: `src/bin.ts` is the only caller, and it is the
+ * only file the `bin` entry points at.
+ */
 export async function run(): Promise<void> {
   process.exitCode = await main(process.argv.slice(2));
-}
-
-// `import.meta.main` is not available on every supported Node, so detect the
-// direct-execution case from argv instead.
-const invokedDirectly =
-  typeof process !== 'undefined' &&
-  Array.isArray(process.argv) &&
-  /agentgrade(\.[cm]?js)?$|cli\.[cm]?[jt]s$/.test(process.argv[1] ?? '');
-
-if (invokedDirectly) {
-  void run();
 }

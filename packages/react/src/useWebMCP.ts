@@ -130,22 +130,42 @@ export function useWebMCPTools(tools: Array<UseWebMCPOptions<never>>): void {
   const latest = useRef(tools);
   latest.current = tools;
 
-  // Re-registration is keyed on the tool set's identity, not on every handler.
-  const key = tools.map((tool) => `${tool.name}:${stableStringify(tool.inputSchema ?? null)}`).join('|');
+  // Everything the runtime is told has to be in the key, or a change to a
+  // description or an annotation would never reach the registry.
+  const key = tools
+    .map((tool) =>
+      [
+        tool.name,
+        tool.description,
+        String(tool.enabled ?? true),
+        stableStringify(tool.inputSchema ?? null),
+        stableStringify(resolveAnnotations(tool)),
+      ].join('\u0000'),
+    )
+    .join('\u0001');
 
   useEffect(() => {
-    const context = ensureModelContext({ polyfill: latest.current[0]?.polyfill ?? true });
+    const active = latest.current.filter((tool) => tool.enabled !== false);
+    if (active.length === 0) return;
+
+    const context = ensureModelContext({ polyfill: active[0]?.polyfill ?? true });
     if (!context) return;
 
-    const registrations = latest.current.map((tool, index) =>
-      context.registerTool({
+    // Snapshot what this effect actually registered. Cleanup must undo *this*
+    // registration, not whatever the newest render happens to hold — otherwise
+    // shrinking or renaming the tool set strands ghost tools in the registry.
+    const registered = active.map((tool) => ({
+      name: tool.name,
+      registration: context.registerTool({
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema ?? { type: 'object', properties: {} },
         annotations: resolveAnnotations(tool),
         async execute(rawArgs: never): Promise<WebMcpResult> {
-          const current = latest.current[index];
-          if (!current) return toWebMcpError('This tool is no longer registered.');
+          // Resolve by name rather than by index: the array may have been
+          // reordered since registration, and calling the wrong handler is
+          // worse than calling a slightly stale one.
+          const current = latest.current.find((entry) => entry.name === tool.name) ?? tool;
 
           const result = await validateArguments(rawArgs, {
             schema: current.inputSchema,
@@ -165,10 +185,10 @@ export function useWebMCPTools(tools: Array<UseWebMCPOptions<never>>): void {
           }
         },
       }),
-    );
+    }));
 
     return () => {
-      latest.current.forEach((tool, index) => unregister(context, tool.name, registrations[index]));
+      for (const entry of registered) unregister(context, entry.name, entry.registration);
     };
   }, [key]);
 }

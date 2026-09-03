@@ -260,6 +260,33 @@ describe('agentgrade audit — output', () => {
 
 /* -------------------------------------------------------------------------- */
 
+describe('package entry points', () => {
+  it('does not run the CLI when the library entry is imported', async () => {
+    // `src/cli.ts` is a library module; only `src/bin.ts` executes. A module
+    // that ran itself on import would make `import '@agentgrade/cli'` audit
+    // something and set the process exit code.
+    const before = process.exitCode;
+    const source = await readFile(new URL('../packages/cli/src/cli.ts', import.meta.url), 'utf8');
+
+    expect(source).not.toContain('#!/usr/bin/env node');
+    expect(source).not.toMatch(/^\s*(void )?run\(\);/m);
+    expect(process.exitCode).toBe(before);
+
+    const bin = await readFile(new URL('../packages/cli/src/bin.ts', import.meta.url), 'utf8');
+    expect(bin.startsWith('#!/usr/bin/env node')).toBe(true);
+    expect(bin).toContain('void run();');
+  });
+
+  it('exposes the documented programmatic surface', () => {
+    // These are what `packages/cli/dist/index.d.ts` promises consumers.
+    for (const exported of [runAudit, normaliseUrl, formatJson, formatMarkdown, formatPretty, parseArgs, main]) {
+      expect(typeof exported).toBe('function');
+    }
+    expect(EXIT_CODES).toEqual({ pass: 0, belowThreshold: 1, usage: 2, scanFailed: 3 });
+    expect(COMMENT_MARKER).toBe('<!-- agentgrade-report -->');
+  });
+});
+
 describe('formatters', () => {
   it('json emits a stable, flat envelope', () => {
     const payload = JSON.parse(formatJson(sample));

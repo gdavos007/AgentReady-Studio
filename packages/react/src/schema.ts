@@ -135,11 +135,16 @@ function describeZodError(error: unknown): string[] {
 export function validateAgainstJsonSchema(value: unknown, schema: JsonSchema): string[] {
   const errors: string[] = [];
 
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+  // A call with no argument object is the same as a call with `{}`: an agent
+  // legitimately omits the payload when the schema requires nothing. Rejecting
+  // it would make a zero-required tool uncallable in its most natural form.
+  const candidate = value === undefined || value === null ? {} : value;
+
+  if (typeof candidate !== 'object' || Array.isArray(candidate)) {
     return [`Expected an object of arguments, received ${describeType(value)}.`];
   }
 
-  const args = value as Record<string, unknown>;
+  const args = candidate as Record<string, unknown>;
   const properties = schema.properties ?? {};
   const required = schema.required ?? [];
 

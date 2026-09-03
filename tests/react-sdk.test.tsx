@@ -311,6 +311,73 @@ describe('useWebMCP', () => {
     expect(registeredTools()).toHaveLength(1);
   });
 
+  it('unregisters the tools it actually registered when the set shrinks', () => {
+    function Surface({ names }: { names: string[] }) {
+      useWebMCPTools(
+        names.map((name) => ({ name, description: `Do ${name}.`, execute: () => 'ok' })) as never,
+      );
+      return null;
+    }
+
+    const view = render(<Surface names={['list_orders', 'list_items', 'list_users']} />);
+    expect(registeredTools()).toHaveLength(3);
+
+    // Cleanup has to undo *this* effect's registrations. Iterating the newest
+    // array instead would leave the dropped tools stranded in the registry,
+    // where an agent would find them and call a dead closure.
+    view.rerender(<Surface names={['list_orders']} />);
+    expect(registeredTools().map((tool) => tool.name)).toEqual(['list_orders']);
+
+    view.rerender(<Surface names={['get_profile']} />);
+    expect(registeredTools().map((tool) => tool.name)).toEqual(['get_profile']);
+
+    view.unmount();
+    expect(registeredTools()).toHaveLength(0);
+  });
+
+  it('re-registers when only a description or annotation changes', () => {
+    function Surface({ description, readOnly }: { description: string; readOnly: boolean }) {
+      useWebMCPTools([
+        { name: 'do_thing', description, readOnly, execute: () => 'ok' },
+      ] as never);
+      return null;
+    }
+
+    const view = render(<Surface description="First wording." readOnly />);
+    expect(findTool('do_thing').description).toBe('First wording.');
+    expect(findTool('do_thing').annotations.readOnlyHint).toBe(true);
+
+    view.rerender(<Surface description="Second wording." readOnly={false} />);
+    // A key that only covered name and schema would leave both of these stale.
+    expect(findTool('do_thing').description).toBe('Second wording.');
+    expect(findTool('do_thing').annotations.readOnlyHint).toBe(false);
+  });
+
+  it('accepts a call with no arguments when the schema requires nothing', async () => {
+    function Optional() {
+      useWebMCP({
+        name: 'list_issues',
+        description: 'List the issues.',
+        inputSchema: {
+          type: 'object',
+          properties: { severity: { type: 'string' } },
+          required: [],
+          additionalProperties: false,
+        },
+        execute: (args) => JSON.stringify(args ?? {}),
+      });
+      return null;
+    }
+
+    render(<Optional />);
+
+    // An agent legitimately omits the payload when nothing is required.
+    for (const args of [undefined, null, {}]) {
+      const result = await callTool('list_issues', args);
+      expect(result.isError, String(args)).toBeUndefined();
+    }
+  });
+
   it('registers several tools at once and tears them all down', () => {
     function Surface() {
       useWebMCPTools([
@@ -583,6 +650,54 @@ describe('AgentForm', () => {
 
     const schema = findTool('submit_form').inputSchema as unknown as JsonSchema;
     expect(schema.properties!.mystery.description).toContain('Add a <label>');
+  });
+
+  it('treats a radio group as one enum parameter and selects the right member', async () => {
+    const onAgentSubmit = vi.fn();
+    render(
+      <AgentForm toolName="book_seat" description="Book a seat." onAgentSubmit={onAgentSubmit}>
+        <fieldset>
+          <legend>Seat class</legend>
+          <label htmlFor="economy">Economy</label>
+          <input id="economy" name="seatClass" type="radio" value="economy" />
+          <label htmlFor="business">Business</label>
+          <input id="business" name="seatClass" type="radio" value="business" />
+        </fieldset>
+      </AgentForm>,
+    );
+
+    const schema = findTool('book_seat').inputSchema as unknown as JsonSchema;
+    // One parameter, not two, and its options are the group's values.
+    expect(Object.keys(schema.properties ?? {})).toEqual(['seatClass']);
+    expect(schema.properties!.seatClass).toMatchObject({
+      type: 'string',
+      enum: ['economy', 'business'],
+      description: 'Seat class.',
+    });
+
+    const result = await callTool('book_seat', { seatClass: 'business' });
+    expect(result.isError).toBeUndefined();
+
+    const economy = document.getElementById('economy') as HTMLInputElement;
+    const business = document.getElementById('business') as HTMLInputElement;
+    expect(business.checked).toBe(true);
+    expect(economy.checked).toBe(false);
+    // Writing `.value` instead of `.checked` would have corrupted this.
+    expect(economy.value).toBe('economy');
+    expect(onAgentSubmit).toHaveBeenCalledWith({ seatClass: 'business' });
+  });
+
+  it('rejects a radio value outside the group', async () => {
+    render(
+      <AgentForm toolName="book_seat" description="Book a seat.">
+        <input id="a" name="seatClass" type="radio" value="economy" />
+        <input id="b" name="seatClass" type="radio" value="business" />
+      </AgentForm>,
+    );
+
+    const result = await callTool('book_seat', { seatClass: 'first' });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('must be one of');
   });
 
   it('renders as an ordinary form and passes DOM props through', () => {
