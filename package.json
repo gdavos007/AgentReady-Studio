@@ -2,14 +2,22 @@
   "name": "agentgrade-inspection-engine",
   "version": "0.1.0",
   "private": true,
-  "description": "AgentGrade core inspection engine: headless WebMCP / AI-agent readiness auditor.",
+  "description": "AgentGrade: headless WebMCP / AI-agent readiness auditor and scoring engine.",
   "type": "module",
-  "main": "dist/scanner/index.js",
-  "types": "dist/scanner/index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./scanner": {
       "types": "./dist/scanner/index.d.ts",
       "default": "./dist/scanner/index.js"
+    },
+    "./evals": {
+      "types": "./dist/evals/index.d.ts",
+      "default": "./dist/evals/index.js"
     }
   },
   "files": ["dist", "README.md"],
@@ -23,6 +31,16 @@
   },
   "dependencies": {
     "playwright": "1.56.1"
+  },
+  "peerDependencies": {
+    "@ai-sdk/anthropic": "*",
+    "@anthropic-ai/sdk": "*",
+    "ai": "*"
+  },
+  "peerDependenciesMeta": {
+    "ai": { "optional": true },
+    "@ai-sdk/anthropic": { "optional": true },
+    "@anthropic-ai/sdk": { "optional": true }
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
