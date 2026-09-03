@@ -15,3 +15,7 @@ next-env.d.ts
 
 # TypeScript incremental build cache
 *.tsbuildinfo
+
+# Workspace package build output
+packages/*/dist/
+packages/*/*.tsbuildinfo

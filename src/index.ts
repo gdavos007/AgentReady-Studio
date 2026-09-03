@@ -14,6 +14,18 @@ import type { AgentScorecard, ScoringOptions } from './evals/types.js';
 
 export * from './scanner/index.js';
 export * from './evals/index.js';
+// The code generator is pure (type-only imports), so it is safe for any
+// consumer — including the CLI and the browser — to pull from the root entry.
+export {
+  generateAllRemediations,
+  generateRemediation,
+  piercesShadowDom,
+  playwrightToCss,
+  type RemediationBundle,
+  type RemediationKind,
+  type RemediationTab,
+  type RemediationTabId,
+} from './lib/codegen.js';
 
 /** Options for {@link auditUrl}. */
 export interface AuditOptions {

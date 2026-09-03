@@ -257,7 +257,7 @@ describe('WebMCP self-registration', () => {
 
     for (const tool of tools) {
       expect(tool.description.length).toBeGreaterThan(40);
-      expect(tool.inputSchema.type).toBe('object');
+      expect(tool.inputSchema?.type).toBe('object');
       expect(tool.annotations?.readOnlyHint).toBe(true);
       expect(tool.annotations?.destructiveHint).toBe(false);
     }
@@ -277,9 +277,26 @@ describe('WebMCP self-registration', () => {
     expect(within(list).getAllByRole('button').length).toBe(criticals.length);
   });
 
-  it('filter_issues ignores an unknown severity rather than erroring', async () => {
+  it('filter_issues rejects an out-of-enum severity with the valid values', async () => {
     renderReport();
-    const payload = await callTool('filter_issues', { severity: 'catastrophic' });
+    const tool = registeredTools().find((entry) => entry.name === 'filter_issues')!;
+
+    let result!: WebMcpResult;
+    await act(async () => {
+      result = (await tool.execute({ severity: 'catastrophic' } as never)) as WebMcpResult;
+    });
+
+    // The SDK validates against the schema the tool advertises, so a value
+    // outside the declared enum never reaches the handler — and the model is
+    // told what it should have sent instead of silently getting everything.
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('"severity" must be one of');
+    expect(result.content[0].text).toContain('"critical"');
+  });
+
+  it('filter_issues defaults to everything when no arguments are supplied', async () => {
+    renderReport();
+    const payload = await callTool('filter_issues', {});
     expect(payload.applied).toEqual({ severity: 'all', pillar: 'all' });
     expect(payload.matchCount).toBe(fixture.scorecard.issues.length);
   });

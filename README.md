@@ -1,6 +1,7 @@
 # AgentGrade
 
-An automated auditor for WebMCP and AI-agent readiness, in three phases.
+An automated auditor for WebMCP and AI-agent readiness: a scanner, a scoring
+engine, a web studio, a CI gate, and a React SDK for fixing what it finds.
 
 **Phase 1 — the inspection engine** (`src/scanner`) drives a headless Chromium
 session and returns a strictly-typed `AuditReport`: every agent-callable tool,
@@ -17,10 +18,117 @@ Next.js 15 App Router UI: a Lighthouse-style report, a code generator that turns
 any finding into drop-in WebMCP snippets, and WebMCP self-registration so a
 browser agent can drive the studio the same way a human clicks it.
 
-```bash
-npm run dev          # studio at http://localhost:3000
-npm run build:web    # production build
+**Phase 4 — the distributable packages** (`packages/`) are what other teams
+install: [`@agentgrade/cli`](packages/cli) to gate CI on the score, and
+[`@agentgrade/react`](packages/react) to fix what the audit finds.
+
+## Architecture
+
 ```
+                        ┌──────────────────────────────────┐
+                        │  src/  — the engine (root)       │
+   audits a site ──────▶│  scanner → evals → lib/codegen   │
+                        └──────────────┬───────────────────┘
+                                       │  @agentgrade/core
+                   ┌───────────────────┼───────────────────┐
+                   ▼                   ▼                   ▼
+         ┌──────────────────┐  ┌──────────────┐  ┌──────────────────┐
+         │ app/ — studio    │  │ packages/cli │  │  .github/        │
+         │ Next.js 15 UI    │  │ CI gate      │  │  workflows/      │
+         └────────┬─────────┘  └──────┬───────┘  └──────────────────┘
+                  │                   │
+                  │ consumes          │ posts PR comment
+                  ▼                   ▼
+         ┌────────────────────────────────────────┐
+         │ packages/react — the fix               │
+         │ useWebMCP · <AgentForm />              │
+         │ zero dependencies, react peer only     │
+         └────────────────────────────────────────┘
+```
+
+Three deliberate edges in that graph:
+
+- **`packages/react` depends on nothing.** Not on the engine, not on Playwright.
+  It is what a stranger installs into their app, so its dependency surface is
+  its most important property. It duplicates ~30 lines of verb tables from the
+  auditor's classifier instead of importing them; a cross-package test pins the
+  two copies to the same answers.
+- **`packages/cli` bundles the engine** at build time under the
+  `@agentgrade/core` alias rather than declaring a dependency on it. The engine
+  lives at the repo root, so a workspace dependency would be circular. The
+  published CLI has exactly one runtime dependency: `playwright`.
+- **The studio consumes `@agentgrade/react`** rather than keeping its own copy
+  of the hook. If the package's registration or cleanup breaks, the studio's own
+  WebMCP tools break with it, and the test suite says so.
+
+## Quickstart
+
+```bash
+npm install
+npx playwright install chromium
+
+npm run dev        # studio at http://localhost:3000
+npm test           # 185 tests, real Chromium against a loopback fixture
+npm run build:all  # engine → CLI → React SDK → studio
+```
+
+The studio hosts its own audit fixture at `/api/fixture`, so the first audit
+works with no outbound network at all.
+
+### CLI
+
+```bash
+npx @agentgrade/cli audit https://example.com --threshold 80
+```
+
+Exit `0` at or above the threshold, `1` below it, `2` on a usage error, `3` when
+the target could not be scanned — so a red build tells you whether the site
+regressed or the deployment was down. Full options in
+[`packages/cli/README.md`](packages/cli/README.md).
+
+### CI/CD
+
+`.github/workflows/agentgrade.yml` runs the audit against a staging URL, blocks
+the build below the threshold, and posts the scorecard on the PR — updating one
+comment rather than burying the thread:
+
+```yaml
+- run: npm run build:cli
+- run: node packages/cli/dist/cli.js audit "$STAGING_URL" --threshold 80 --format markdown --output comment.md
+```
+
+Point it at a deployment with the `AGENTGRADE_URL` repository variable. With
+none set it audits the bundled fixture, so a fork gets a green run on the first
+push instead of a red one it has to debug.
+
+### React SDK
+
+```tsx
+import { useWebMCP, AgentForm } from '@agentgrade/react';
+
+// Register one action as a tool.
+useWebMCP({
+  name: 'search_products',
+  description: 'Search the catalog and return matching items.',
+  inputSchema: {
+    type: 'object',
+    properties: { query: { type: 'string', description: 'Free-text search.' } },
+    required: ['query'],
+  },
+  execute: ({ query }) => searchProducts(query),
+});
+
+// Or make an existing form agent-callable — the schema is derived from the
+// fields' own types and labels, and the agent's values submit through your
+// existing onSubmit.
+<AgentForm toolName="place_order" description="Place the order." onSubmit={handleSubmit}>
+  <label htmlFor="email">Email address</label>
+  <input id="email" name="email" type="email" required />
+  <button type="submit">Buy</button>
+</AgentForm>
+```
+
+Full API in [`packages/react/README.md`](packages/react/README.md).
 
 ```ts
 import { auditUrl } from './src/index.js';
@@ -245,12 +353,29 @@ src/
     synthetic-agent.ts      Active evaluation agent + simulated fallback
     analysis.ts             Shared derivations (tool classification, coverage)
     types.ts                The Phase 2 data contract
+packages/
+  cli/                      @agentgrade/cli — terminal audits and the CI gate
+    src/cli.ts              Argument parsing, exit codes
+    src/audit.ts            Scan + score runner
+    src/formatters/         pretty · json · markdown
+    src/terminal.ts         ANSI styling and tables, no dependencies
+    build.mjs               esbuild bundle; Playwright stays external
+  react/                    @agentgrade/react — the fix, zero dependencies
+    src/useWebMCP.ts        Registration, validation, unmount cleanup
+    src/AgentForm.tsx       Form introspection → tool schema
+    src/schema.ts           JSON Schema / Zod / Standard Schema validation
+    src/semantics.ts        readOnlyHint inference
+    src/runtime.ts          modelContext resolution and marked polyfill
+.github/workflows/
+  agentgrade.yml            Threshold gate + PR comment
 tests/
   scanner.test.ts           Phase 1 end-to-end suite
   evals.test.ts             Phase 2 scoring, benchmark, and agent suite
   codegen.test.ts           Generated-code syntax validity and highlighting
   studio-api.test.ts        Store, pipeline, and API route execution
   studio-ui.test.tsx        Component rendering and WebMCP tool behaviour
+  cli.test.ts               CLI exit codes, formats, and file output
+  react-sdk.test.tsx        Tool registration, validation, unmount cleanup
   fixtures/mock-site.html   Storefront with registered tools and seeded traps
   helpers/fixture-server.ts Serves the fixtures plus the well-known descriptors
   helpers/audit-factory.ts  Builders for synthetic AgentAuditRawData payloads
@@ -270,11 +395,18 @@ A soft navigation timeout that still rendered usable DOM is inspected anyway.
 ```bash
 npm install
 npm run typecheck
-npm test          # launches real Chromium against the loopback fixture server
-npm run build     # library (tsc → dist/)
-npm run build:web # studio (next build)
-npm run dev       # studio at http://localhost:3000
+npm test            # 185 tests, real Chromium against a loopback fixture server
+npm run build       # engine (tsc → dist/)
+npm run build:cli   # @agentgrade/cli (esbuild bundle)
+npm run build:react # @agentgrade/react (tsc → declarations)
+npm run build:web   # studio (next build)
+npm run build:all   # all four, in dependency order
+npm run dev         # studio at http://localhost:3000
 ```
+
+Workspaces are plain npm workspaces (`packages/*`) — no Turborepo, because the
+build graph is four ordered steps and a task runner would be more moving parts
+than it saves.
 
 The test suite needs a Chromium build. If Playwright has not downloaded one yet:
 

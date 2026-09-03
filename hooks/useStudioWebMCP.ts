@@ -5,6 +5,7 @@ import { useCallback, useMemo } from 'react';
 import type { AgentScorecard, AuditIssue, IssueSeverity, PillarId } from '@/src/evals/types';
 import type { RemediationBundle, RemediationTabId } from '@/src/lib/codegen';
 import { useWebMCPTools, type WebMcpResult, type WebMcpToolDefinition } from './useWebMCP';
+import type { JsonSchema } from '@agentgrade/react';
 
 /** Filter state the studio's issue list is driven by. */
 export interface IssueFilter {
@@ -33,6 +34,63 @@ const SURFACES: ReadonlyArray<RemediationTabId | 'all'> = [
   'react-hook',
   'declarative-html',
 ];
+
+
+/* -------------------------------------------------------------------------- */
+/* Tool schemas                                                                */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Declared as standalone constants rather than inline literals: an array of
+ * heterogeneous object literals unifies into a single widened shape, which
+ * makes every property optional and stops matching `JsonSchema`.
+ */
+const FILTER_ISSUES_SCHEMA: JsonSchema = {
+  type: 'object',
+  properties: {
+    severity: {
+      type: 'string',
+      enum: [...SEVERITIES],
+      description: 'Severity to filter by. "all" clears the severity filter.',
+    },
+    pillar: {
+      type: 'string',
+      enum: [...PILLARS],
+      description: 'Scoring pillar to filter by. "all" clears the pillar filter.',
+    },
+  },
+  required: [],
+  additionalProperties: false,
+};
+
+const SELECT_ISSUE_SCHEMA: JsonSchema = {
+  type: 'object',
+  properties: {
+    issueId: {
+      type: 'string',
+      description: 'The issue id, e.g. "friction.unlabelled-input". Use filter_issues to list them.',
+    },
+  },
+  required: ['issueId'],
+  additionalProperties: false,
+};
+
+const EXPORT_REMEDIATION_SCHEMA: JsonSchema = {
+  type: 'object',
+  properties: {
+    issueId: {
+      type: 'string',
+      description: 'The issue to generate code for. Defaults to the currently selected issue.',
+    },
+    surface: {
+      type: 'string',
+      enum: [...SURFACES],
+      description: 'Which code surface to return. "all" returns every tab.',
+    },
+  },
+  required: [],
+  additionalProperties: false,
+};
 
 /**
  * Registers the studio's own WebMCP tools.
@@ -172,23 +230,7 @@ export function useStudioWebMCP(options: StudioWebMCPOptions): void {
         name: 'filter_issues',
         description:
           'Filter the audit findings currently shown in AgentGrade Studio by severity and/or pillar, and return the matching issues with the points each one costs.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            severity: {
-              type: 'string',
-              enum: [...SEVERITIES],
-              description: 'Severity to filter by. "all" clears the severity filter.',
-            },
-            pillar: {
-              type: 'string',
-              enum: [...PILLARS],
-              description: 'Scoring pillar to filter by. "all" clears the pillar filter.',
-            },
-          },
-          required: [],
-          additionalProperties: false,
-        },
+        inputSchema: FILTER_ISSUES_SCHEMA,
         annotations: { readOnlyHint: true, destructiveHint: false },
         execute: filterIssues as (args: never) => WebMcpResult,
       },
@@ -196,17 +238,7 @@ export function useStudioWebMCP(options: StudioWebMCPOptions): void {
         name: 'select_issue',
         description:
           'Select one audit issue by id, opening its remediation drawer, and return its full detail including root-cause selectors and the score it would restore.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            issueId: {
-              type: 'string',
-              description: 'The issue id, e.g. "friction.unlabelled-input". Use filter_issues to list them.',
-            },
-          },
-          required: ['issueId'],
-          additionalProperties: false,
-        },
+        inputSchema: SELECT_ISSUE_SCHEMA,
         annotations: { readOnlyHint: true, destructiveHint: false },
         execute: selectIssue as (args: never) => WebMcpResult,
       },
@@ -214,22 +246,7 @@ export function useStudioWebMCP(options: StudioWebMCPOptions): void {
         name: 'export_remediation_code',
         description:
           'Return the generated WebMCP remediation code for an issue: the browser-native registerTool call, the React useWebMCP hook, and the declarative HTML markup.',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            issueId: {
-              type: 'string',
-              description: 'The issue to generate code for. Defaults to the currently selected issue.',
-            },
-            surface: {
-              type: 'string',
-              enum: [...SURFACES],
-              description: 'Which code surface to return. "all" returns every tab.',
-            },
-          },
-          required: [],
-          additionalProperties: false,
-        },
+        inputSchema: EXPORT_REMEDIATION_SCHEMA,
         annotations: { readOnlyHint: true, destructiveHint: false },
         execute: exportRemediationCode as (args: never) => WebMcpResult,
       },

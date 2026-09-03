@@ -12,10 +12,25 @@ export default defineConfig({
   },
   // Mirrors the `@/*` path alias from tsconfig.json, so tests can import the
   // Next.js app's route handlers and components exactly as the app does.
+  // Order matters: Vite matches string aliases by prefix, so the scoped
+  // workspace names must be listed before the bare '@' root alias or
+  // '@agentgrade/react' would resolve to '<root>agentgrade/react'.
   resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('.', import.meta.url)),
-    },
+    alias: [
+      {
+        find: '@agentgrade/react',
+        replacement: fileURLToPath(new URL('./packages/react/src/index.ts', import.meta.url)),
+      },
+      {
+        find: '@agentgrade/cli',
+        replacement: fileURLToPath(new URL('./packages/cli/src/index.ts', import.meta.url)),
+      },
+      {
+        find: '@agentgrade/core',
+        replacement: fileURLToPath(new URL('./src/index.ts', import.meta.url)),
+      },
+      { find: '@/', replacement: fileURLToPath(new URL('./', import.meta.url)) },
+    ],
   },
   test: {
     environment: 'node',

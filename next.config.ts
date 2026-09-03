@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+
 import type { NextConfig } from 'next';
 
 /**
@@ -24,6 +26,12 @@ const nextConfig: NextConfig = {
   },
 
   webpack(config) {
+    // Resolve the workspace SDK to its source rather than its build output, so
+    // `next dev` needs no prior `npm run build:react`.
+    config.resolve.alias = {
+      ...config.resolve.alias,
+      '@agentgrade/react': fileURLToPath(new URL('./packages/react/src/index.ts', import.meta.url)),
+    };
     config.resolve.extensionAlias = {
       ...config.resolve.extensionAlias,
       '.js': ['.ts', '.tsx', '.js'],
@@ -34,6 +42,9 @@ const nextConfig: NextConfig = {
 
   turbopack: {
     resolveExtensions: ['.tsx', '.ts', '.jsx', '.js', '.mjs', '.json'],
+    resolveAlias: {
+      '@agentgrade/react': './packages/react/src/index.ts',
+    },
   },
 };
 

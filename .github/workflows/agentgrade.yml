@@ -1,0 +1,183 @@
+name: AgentGrade
+
+# Audits a deployed URL for WebMCP and AI-agent readiness, blocks the build when
+# the score drops below the threshold, and posts the scorecard on the PR.
+#
+# Set the target with the `AGENTGRADE_URL` repository variable (Settings →
+# Secrets and variables → Actions → Variables). With no target configured the
+# job audits the studio's own bundled fixture, so a fork gets a working, green
+# run on the first push instead of a red one it has to debug.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      url:
+        description: URL to audit
+        required: false
+        type: string
+      threshold:
+        description: Minimum score required to pass
+        required: false
+        default: '80'
+        type: string
+
+# One audit per branch: a new push makes the in-flight run's verdict obsolete.
+concurrency:
+  group: agentgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # Required to post and update the scorecard comment.
+  pull-requests: write
+
+jobs:
+  audit:
+    name: Agent readiness audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      TARGET_URL: ${{ inputs.url || vars.AGENTGRADE_URL }}
+      THRESHOLD: ${{ inputs.threshold || vars.AGENTGRADE_THRESHOLD || '80' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Chromium
+        # The browser download is the slowest step in the job; skip it whenever
+        # the cache already holds a matching build.
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Build the CLI
+        run: npm run build:cli
+
+      # No target configured: serve the bundled fixture so the workflow is
+      # demonstrably working before anyone wires up a staging URL.
+      - name: Start the bundled fixture
+        if: env.TARGET_URL == ''
+        run: |
+          npm run build:web
+          npm start -- --port 3000 &
+          # Poll rather than adding a wait-on dependency for one line of CI.
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:3000/api/fixture > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:3000/api/fixture > /dev/null
+          echo "TARGET_URL=http://127.0.0.1:3000/api/fixture" >> "$GITHUB_ENV"
+
+      - name: Run the audit
+        id: audit
+        # Never let a failing gate skip the comment — the comment is what tells
+        # the author why the build went red. The exit code is re-applied at the
+        # end of the job.
+        continue-on-error: true
+        run: |
+          set +e
+          node packages/cli/dist/cli.js audit "$TARGET_URL" \
+            --threshold "$THRESHOLD" \
+            --format markdown \
+            --output agentgrade-comment.md \
+            --goal "Execute the primary transaction"
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+          # A second pass writes the machine-readable report for the summary and
+          # for any downstream job that wants the numbers.
+          node packages/cli/dist/cli.js audit "$TARGET_URL" \
+            --threshold "$THRESHOLD" \
+            --format json \
+            --output agentgrade-report.json \
+            --quiet
+          set -e
+
+      - name: Write the job summary
+        if: always() && hashFiles('agentgrade-comment.md') != ''
+        run: cat agentgrade-comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentgrade-report
+          path: |
+            agentgrade-report.json
+            agentgrade-comment.md
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request' && hashFiles('agentgrade-comment.md') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('agentgrade-comment.md', 'utf8');
+
+            // The CLI stamps every comment with this marker so successive
+            // pushes update one comment instead of burying the thread.
+            const MARKER = '<!-- agentgrade-report -->';
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+
+            const existing = comments.find(
+              (comment) => comment.user?.type === 'Bot' && comment.body?.includes(MARKER),
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Enforce the threshold
+        # Re-applies the audit's exit code now that the comment has been posted.
+        #   1 — the score is below the threshold
+        #   3 — the target could not be scanned at all
+        run: |
+          CODE="${{ steps.audit.outputs.exit_code }}"
+          if [ "$CODE" = "0" ]; then
+            echo "AgentGrade passed the threshold of $THRESHOLD."
+            exit 0
+          fi
+          if [ "$CODE" = "3" ]; then
+            echo "::error title=AgentGrade::$TARGET_URL could not be scanned. Check that the deployment is reachable from CI."
+            exit 1
+          fi
+          echo "::error title=AgentGrade::Agent readiness score is below the threshold of $THRESHOLD. See the PR comment for the top deductions."
+          exit 1

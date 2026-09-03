@@ -34,6 +34,18 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@agentgrade/core": [
+        "./src/index.ts"
+      ],
+      "@agentgrade/core/*": [
+        "./src/*"
+      ],
+      "@agentgrade/react": [
+        "./packages/react/src/index.ts"
+      ],
+      "@agentgrade/cli": [
+        "./packages/cli/src/index.ts"
       ]
     },
     "noEmit": true
@@ -49,11 +61,14 @@
     "tests/**/*.tsx",
     "vitest.config.ts",
     "next.config.ts",
-    ".next/types/**/*.ts"
+    ".next/types/**/*.ts",
+    "packages/**/*.ts",
+    "packages/**/*.tsx"
   ],
   "exclude": [
     "node_modules",
     "dist",
-    ".next"
+    ".next",
+    "packages/*/dist"
   ]
 }

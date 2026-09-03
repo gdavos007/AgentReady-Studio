@@ -1,0 +1,32 @@
+{
+  "name": "@agentgrade/cli",
+  "version": "0.1.0",
+  "description": "Audit any site for WebMCP and AI-agent readiness from the terminal, and gate CI builds on the score.",
+  "license": "MIT",
+  "type": "module",
+  "bin": { "agentgrade": "./dist/cli.js" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "playwright": "1.56.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.2"
+  },
+  "keywords": ["webmcp", "mcp", "ai-agent", "audit", "ci", "lighthouse", "agentgrade"],
+  "publishConfig": { "access": "public" }
+}
