@@ -86,10 +86,16 @@ export default async function HomePage() {
         </section>
       ) : null}
 
-      <footer className="mt-16 border-t border-line pt-6">
+      <footer className="mt-16 space-y-2 border-t border-line pt-6">
         <p className="text-xs leading-relaxed text-ink-faint">
           Reports are stored locally via <span className="font-mono">node:sqlite</span> in{' '}
           <span className="font-mono">.agentgrade/reports.db</span> — nothing leaves this machine.
+        </p>
+        <p className="text-xs leading-relaxed text-ink-faint">
+          Private, loopback and link-local targets are refused by default, so the studio cannot be
+          used to reach your internal network or cloud metadata. To audit the sample targets below
+          — which are served from this machine — start it with{' '}
+          <span className="font-mono">AGENTGRADE_ALLOW_PRIVATE_TARGETS=1 npm run dev</span>.
         </p>
       </footer>
     </main>

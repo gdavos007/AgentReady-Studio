@@ -72,8 +72,30 @@ npm test           # 185 tests, real Chromium against a loopback fixture
 npm run build:all  # engine → CLI → React SDK → studio
 ```
 
-The studio hosts its own audit fixture at `/api/fixture`, so the first audit
-works with no outbound network at all.
+The studio hosts its own audit fixture at `/api/fixture`. Because that target is
+on loopback, and the SSRF guard refuses private addresses by default, the sample
+audits need an explicit opt-in:
+
+```bash
+AGENTGRADE_ALLOW_PRIVATE_TARGETS=1 npm run dev
+```
+
+### Network safety
+
+The scanner is a real browser pointed at a caller-supplied URL, so by default it
+refuses targets that resolve to private, loopback, CGNAT, or link-local
+addresses — including the cloud metadata endpoint at `169.254.169.254`. Hosts
+are judged by their *resolved* addresses rather than by their names, every A/AAAA
+record must be public, and every request the page makes (redirects and
+subresources included) is re-checked, so a public URL cannot 302 into your
+network.
+
+Opt in with `AGENTGRADE_ALLOW_PRIVATE_TARGETS=1`, `--allow-private` on the CLI,
+or `allowPrivateTargets: true` on `scanUrl`.
+
+Chromium runs **with** its sandbox and with Site Isolation intact. Unprivileged
+containers that cannot provide user namespaces opt out explicitly, with
+`AGENTGRADE_NO_SANDBOX=1`, `--no-sandbox`, or `disableSandbox: true`.
 
 ### CLI
 

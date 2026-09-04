@@ -14,7 +14,8 @@
 import { randomUUID } from 'node:crypto';
 
 import { gradeFor } from '../shared/grade.js';
-import { chromium, type Browser, type BrowserContext, type Page, type Response } from 'playwright';
+import { checkHost, checkRequestUrl, privateTargetsAllowed } from '../lib/net-guard.js';
+import { chromium, type Browser, type BrowserContext, type Page, type Response, type Route } from 'playwright';
 
 import {
   mergeTags,
@@ -95,11 +96,37 @@ const DEFAULT_HEADERS: Record<string, string> = {
 const LAUNCH_ARGS = [
   '--disable-blink-features=AutomationControlled',
   '--disable-dev-shm-usage',
-  '--no-sandbox',
-  '--disable-features=IsolateOrigins,site-per-process',
   '--disable-background-timer-throttling',
   '--disable-renderer-backgrounding',
 ];
+
+/** Environment escape hatch for platforms that cannot provide user namespaces. */
+export const NO_SANDBOX_ENV = 'AGENTGRADE_NO_SANDBOX';
+
+/**
+ * Builds the Chromium argument list.
+ *
+ * Two flags are deliberately absent from {@link LAUNCH_ARGS}:
+ *
+ * `--no-sandbox` is the last line of defence between a hostile page's renderer
+ * and the host user's SSH keys and npm tokens. This tool points a browser at
+ * arbitrary untrusted URLs by design, so the sandbox is opt-in — set
+ * `disableSandbox`, or `AGENTGRADE_NO_SANDBOX=1` in an unprivileged container
+ * that cannot provide user namespaces.
+ *
+ * `--disable-features=IsolateOrigins,site-per-process` used to be here to make
+ * iframe inspection easier. It disables Site Isolation, re-opening the
+ * cross-origin leak defences that exist precisely because pages are hostile —
+ * and it bought nothing, since the scanner reads the main frame's DOM rather
+ * than cross-origin iframe internals.
+ */
+export function launchArgs(disableSandbox?: boolean): string[] {
+  const args = [...LAUNCH_ARGS];
+  if (disableSandbox ?? process.env[NO_SANDBOX_ENV] === '1') {
+    args.push('--no-sandbox', '--disable-setuid-sandbox');
+  }
+  return args;
+}
 
 /** Text signatures that indicate a bot wall or consent interstitial. */
 const BOT_WALL_PATTERNS: ReadonlyArray<{ signal: string; pattern: RegExp }> = [
@@ -195,6 +222,7 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
     skipDescriptors: options.skipDescriptors ?? DEFAULT_OPTIONS.skipDescriptors,
     enableCdp: options.enableCdp ?? DEFAULT_OPTIONS.enableCdp,
     extraHttpHeaders: options.extraHttpHeaders ?? {},
+    allowPrivateTargets: privateTargetsAllowed(options.allowPrivateTargets),
   };
 
   const normalisedUrl = normaliseUrl(targetUrl);
@@ -214,6 +242,28 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
   }
 
   const url = normalisedUrl.url;
+
+  // H1: refuse a private target before a browser is even launched. Checked by
+  // resolved address rather than by hostname text, because `evil.test` can have
+  // an A record pointing at the metadata endpoint.
+  if (!config.allowPrivateTargets) {
+    const guard = await guardTarget(url);
+    if (guard) {
+      log.add('error', 'navigate', 'blocked-private-target', guard);
+      return failedReport({
+        requestedUrl: url,
+        origin: originOf(url),
+        startedAt,
+        startedAtMs,
+        userAgent: config.userAgent,
+        viewport: config.viewport,
+        log,
+        navigationError: guard,
+        navigationStatus: 'blocked',
+      });
+    }
+  }
+
   let browser: Browser | null = null;
   let ownsBrowser = false;
   let context: BrowserContext | null = null;
@@ -224,7 +274,10 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
       browser = options.browser as unknown as Browser;
     } else {
       try {
-        browser = await chromium.launch({ headless: config.headless, args: [...LAUNCH_ARGS] });
+        browser = await chromium.launch({
+          headless: config.headless,
+          args: launchArgs(options.disableSandbox),
+        });
         ownsBrowser = true;
       } catch (error) {
         log.add('error', 'launch', 'browser-launch-failed', messageOf(error));
@@ -244,6 +297,17 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
       extraHTTPHeaders: { ...DEFAULT_HEADERS, ...config.extraHttpHeaders },
       ...(options.proxy ? { proxy: options.proxy } : {}),
     });
+    // M5: a pre-flight check cannot see a 302. Every request the page makes —
+    // the main document, its redirects, and every subresource — is re-checked
+    // against its resolved address here. Registered only when private targets
+    // are disallowed, so the permitted path pays no DNS cost.
+    if (!config.allowPrivateTargets) {
+      await context.route(
+        '**/*',
+        createNetworkGuardRoute((reason) => log.add('warning', 'navigate', 'blocked-private-request', reason)),
+      );
+    }
+
     context.setDefaultTimeout(config.navigationTimeoutMs);
     context.setDefaultNavigationTimeout(config.navigationTimeoutMs);
     await context.addInitScript(EVALUATION_HELPER_SHIM);
@@ -387,7 +451,10 @@ export async function scanUrls(urls: string[], options: ScannerOptions = {}): Pr
     return reports;
   }
 
-  const browser = await chromium.launch({ headless: options.headless ?? DEFAULT_OPTIONS.headless, args: [...LAUNCH_ARGS] });
+  const browser = await chromium.launch({
+    headless: options.headless ?? DEFAULT_OPTIONS.headless,
+    args: launchArgs(options.disableSandbox),
+  });
   try {
     const reports: AuditReport[] = [];
     for (const url of urls) {
@@ -417,6 +484,54 @@ function normaliseUrl(input: string): { ok: true; url: string } | { ok: false; e
     return { ok: false, error: `Unsupported protocol "${parsed.protocol}"` };
   }
   return { ok: true, url: parsed.toString() };
+}
+
+/**
+ * The route handler that enforces the SSRF guard on every outbound request.
+ *
+ * Exported so tests exercise the shipped handler rather than a reimplementation
+ * of it — a copy in the test suite would pass while the real one regressed.
+ *
+ * @param onBlocked Notified with a reason whenever a request is aborted.
+ */
+export function createNetworkGuardRoute(
+  onBlocked?: (reason: string) => void,
+): (route: Route) => Promise<void> {
+  return async (route: Route): Promise<void> => {
+    try {
+      const url = route.request().url();
+      const verdict = await checkRequestUrl(url);
+      if (verdict.allowed) return await route.continue();
+
+      onBlocked?.(`${url}: ${verdict.reason}`);
+      return await route.abort('blockedbyclient');
+    } catch {
+      // A route that can no longer be fulfilled (the page closed mid-flight)
+      // must not wedge the scan.
+      try {
+        await route.abort('failed');
+      } catch {
+        /* already handled */
+      }
+    }
+  };
+}
+
+/**
+ * Pre-flight guard for the initial target.
+ * Returns a reason string when the target must not be scanned, else `null`.
+ */
+async function guardTarget(url: string): Promise<string | null> {
+  const parsed = new URL(url);
+
+  // `file:` reads the host filesystem. Legitimate for a local library caller,
+  // never legitimate for one that did not opt in.
+  if (parsed.protocol === 'file:') {
+    return 'Refusing to scan a file:// target: set allowPrivateTargets to read local files.';
+  }
+
+  const verdict = await checkHost(parsed.hostname);
+  return verdict.allowed ? null : `Refusing to scan ${parsed.origin}: ${verdict.reason}`;
 }
 
 function originOf(url: string): string {

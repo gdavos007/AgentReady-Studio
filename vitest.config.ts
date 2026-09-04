@@ -34,6 +34,15 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
+    // The suite scans loopback fixture servers and a file:// fixture, and this
+    // container cannot provide user namespaces for the Chromium sandbox. Both
+    // are opt-in in production code; the tests opt in explicitly here rather
+    // than the defaults being unsafe. `tests/security.test.ts` unsets them to
+    // prove the guards actually bite.
+    env: {
+      AGENTGRADE_ALLOW_PRIVATE_TARGETS: '1',
+      AGENTGRADE_NO_SANDBOX: '1',
+    },
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
     // A real Chromium launch plus navigation needs more than the 5s default.
     testTimeout: 120_000,

@@ -33,6 +33,16 @@ export interface RunAuditOptions {
   onProgress?: (message: string) => void;
   /** Reuse a browser across several audits. */
   browser?: ScannerOptions['browser'];
+  /**
+   * Permit auditing private, loopback, and link-local targets.
+   *
+   * Off by default, matching the scanner: a CI job that can be handed a URL
+   * should not be a pivot into the runner's network. Operators auditing their
+   * own staging box on a private address opt in explicitly.
+   */
+  allowPrivateTargets?: boolean;
+  /** Launch Chromium with `--no-sandbox`. Only for unprivileged containers. */
+  disableSandbox?: boolean;
 }
 
 /** The outcome of one CLI audit. */
@@ -65,6 +75,10 @@ export async function runAudit(url: string, options: RunAuditOptions): Promise<A
     ...(options.proxy ? { proxy: { server: options.proxy } } : {}),
     ...(options.headers ? { extraHttpHeaders: options.headers } : {}),
     ...(options.browser ? { browser: options.browser } : {}),
+    ...(options.allowPrivateTargets !== undefined
+      ? { allowPrivateTargets: options.allowPrivateTargets }
+      : {}),
+    ...(options.disableSandbox !== undefined ? { disableSandbox: options.disableSandbox } : {}),
     onDiagnostic: (diagnostic: ScanDiagnostic) => {
       if (diagnostic.level === 'error') options.onProgress?.(`error: ${diagnostic.message}`);
     },

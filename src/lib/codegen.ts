@@ -761,13 +761,15 @@ function renderDeclarativeHtml(
 /** Renders the `<form data-mcp-tool>` annotation with matching field names. */
 function renderAnnotatedForm(tool: InferredTool): string {
   const form = tool.form!;
+  // Escaped for a double-quoted attribute like every other attribute below —
+  // one quoting convention across the generator means one escaping rule.
   const schemaAttribute = escapeAttribute(JSON.stringify(tool.inputSchema));
 
   const lines = [
     `<form`,
     `  data-mcp-tool="${escapeAttribute(tool.name)}"`,
     `  data-mcp-description="${escapeAttribute(tool.description)}"`,
-    `  data-mcp-schema='${schemaAttribute}'`,
+    `  data-mcp-schema="${schemaAttribute}"`,
     form.action ? `  action="${escapeAttribute(form.action)}"` : '  action="/api/submit"',
     `  method="${escapeAttribute((form.method ?? 'POST').toLowerCase())}"`,
     '>',
@@ -983,9 +985,24 @@ function splitWords(value: string): string[] {
     .map((word) => word.toLowerCase());
 }
 
-/** Escapes a value for an HTML attribute in double quotes. */
+/**
+ * Escapes a value for an HTML attribute.
+ *
+ * Both quote characters are escaped, not just the double quote. Every value
+ * here originates in the audited page — a form label, a tool name, a
+ * description — and the output is code the studio tells a developer to paste
+ * into their own site. A single unescaped `'` closes the attribute and the rest
+ * of the label becomes markup: `x' onfocus='alert(1)' autofocus x` parses as
+ * two real event-handler attributes. That is stored XSS delivered through
+ * remediation advice, so this function escapes for *any* attribute context.
+ */
 export function escapeAttribute(value: string): string {
-  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 /** Escapes a value for HTML text content. */

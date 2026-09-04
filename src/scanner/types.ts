@@ -529,6 +529,22 @@ export interface ScannerOptions {
   extraHttpHeaders?: Record<string, string>;
   /** Upstream proxy for both navigation and descriptor fetches. */
   proxy?: { server: string; bypass?: string; username?: string; password?: string };
+  /**
+   * Permit scanning private, loopback, and link-local targets, and `file://`.
+   *
+   * Off by default: the scanner is a browser pointed at a caller-supplied URL,
+   * so without this it would read cloud metadata and internal services for
+   * anyone who can submit a target. Defaults to
+   * `AGENTGRADE_ALLOW_PRIVATE_TARGETS=1` when unset.
+   */
+  allowPrivateTargets?: boolean;
+  /**
+   * Launch Chromium with `--no-sandbox`.
+   *
+   * Only for unprivileged containers that cannot provide user namespaces.
+   * Defaults to `AGENTGRADE_NO_SANDBOX=1` when unset.
+   */
+  disableSandbox?: boolean;
   /** Skip `/.well-known/*` and `/llms.txt` probing. Default `false`. */
   skipDescriptors?: boolean;
   /** Reuse an already-launched browser instead of launching one. */

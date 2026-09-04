@@ -1,3 +1,4 @@
+import { checkHost, privateTargetsAllowed } from '@/src/lib/net-guard';
 import { streamAuditPipeline } from '@/src/lib/pipeline';
 import { getReportStore } from '@/src/lib/store';
 
@@ -38,6 +39,23 @@ export async function POST(request: Request): Promise<Response> {
 
   const target = normaliseTarget(url);
   if (!target.ok) return jsonError(target.error, 400);
+
+  // The network-facing boundary: anyone who can POST here would otherwise get a
+  // full browser aimed at the host's internal network, and the rendered page's
+  // title, headings and form structure all come back in the report. Checked by
+  // resolved address, not hostname text.
+  //
+  // The studio's own sample target is `http://localhost:3000/api/fixture`, so
+  // AGENTGRADE_ALLOW_PRIVATE_TARGETS=1 re-enables loopback for local use.
+  if (!privateTargetsAllowed()) {
+    const verdict = await checkHost(new URL(target.url).hostname);
+    if (!verdict.allowed) {
+      return jsonError(
+        `${verdict.reason} Set AGENTGRADE_ALLOW_PRIVATE_TARGETS=1 to scan local and internal targets.`,
+        403,
+      );
+    }
+  }
 
   const stream = streamAuditPipeline(target.url, {
     syntheticGoal: typeof body.syntheticGoal === 'string' ? body.syntheticGoal : undefined,

@@ -51,6 +51,8 @@ export interface ParsedArgs {
   timeoutMs: number | null;
   syntheticGoal: string | null;
   headers: Record<string, string>;
+  allowPrivate: boolean;
+  noSandbox: boolean;
   quiet: boolean;
   maxIssues: number | null;
   color: boolean | null;
@@ -73,6 +75,11 @@ OPTIONS
   --timeout <ms>         Navigation timeout. Default 30000.
   --goal <text>          Goal for the synthetic agent evaluation.
   --header <k:v>         Extra request header. Repeatable.
+  --allow-private        Permit private, loopback and link-local targets.
+                         Off by default so a CI job handed a URL cannot pivot
+                         into the runner's network. Also AGENTGRADE_ALLOW_PRIVATE_TARGETS=1.
+  --no-sandbox           Launch Chromium without its sandbox. Only for
+                         unprivileged containers. Also AGENTGRADE_NO_SANDBOX=1.
   --max-issues <number>  How many issues to show. Default 8 (pretty) / 10 (markdown).
   --no-color             Disable ANSI colour. NO_COLOR is also honoured.
   --quiet                Suppress progress output on stderr.
@@ -90,6 +97,7 @@ EXAMPLES
   agentgrade audit staging.example.com --threshold 70
   agentgrade audit https://example.com --format json | jq .score
   agentgrade audit https://example.com --format markdown --output comment.md
+  agentgrade audit http://localhost:3000 --allow-private
 `;
 
 /** Parses argv. Never throws; a problem lands in {@link ParsedArgs.error}. */
@@ -104,6 +112,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     timeoutMs: null,
     syntheticGoal: null,
     headers: {},
+    allowPrivate: false,
+    noSandbox: false,
     quiet: false,
     maxIssues: null,
     color: null,
@@ -193,6 +203,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
         parsed.maxIssues = numeric;
         break;
       }
+      case '--allow-private':
+        parsed.allowPrivate = true;
+        break;
+      case '--no-sandbox':
+        parsed.noSandbox = true;
+        break;
       case '--no-color':
         parsed.color = false;
         break;
@@ -277,6 +293,8 @@ export async function main(argv: string[], io: CliIo = defaultIo): Promise<numbe
       proxy: args.proxy ?? undefined,
       syntheticGoal: args.syntheticGoal ?? undefined,
       headers: Object.keys(args.headers).length > 0 ? args.headers : undefined,
+      ...(args.allowPrivate ? { allowPrivateTargets: true } : {}),
+      ...(args.noSandbox ? { disableSandbox: true } : {}),
       onProgress,
     });
   } catch (error) {

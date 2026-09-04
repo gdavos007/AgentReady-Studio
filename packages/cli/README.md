@@ -23,6 +23,8 @@ agentgrade audit <url> [options]
 | `--goal <text>` | Goal for the synthetic agent evaluation. |
 | `--header <k: v>` | Extra request header. Repeatable — use it for a staging auth token. |
 | `--max-issues <n>` | How many issues to show. |
+| `--allow-private` | Permit private, loopback and link-local targets. Off by default, so a CI job handed a URL cannot pivot into the runner's network. Also `AGENTGRADE_ALLOW_PRIVATE_TARGETS=1`. |
+| `--no-sandbox` | Launch Chromium without its sandbox. Only for unprivileged containers. Also `AGENTGRADE_NO_SANDBOX=1`. |
 | `--no-color` | Disable ANSI colour. `NO_COLOR` is also honoured. |
 | `--quiet` | Suppress progress output on stderr. |
 

@@ -102,6 +102,9 @@ jobs:
           done
           curl -fsS http://127.0.0.1:3000/api/fixture > /dev/null
           echo "TARGET_URL=http://127.0.0.1:3000/api/fixture" >> "$GITHUB_ENV"
+          # The SSRF guard blocks loopback by default; this fallback audits a
+          # fixture we started ourselves on this runner, so it opts in.
+          echo "AUDIT_EXTRA_ARGS=--allow-private" >> "$GITHUB_ENV"
 
       - name: Run the audit
         id: audit
@@ -111,20 +114,22 @@ jobs:
         continue-on-error: true
         run: |
           set +e
+          # shellcheck disable=SC2086 -- AUDIT_EXTRA_ARGS is a flag list, not a path.
           node packages/cli/dist/cli.js audit "$TARGET_URL" \
             --threshold "$THRESHOLD" \
             --format markdown \
             --output agentgrade-comment.md \
-            --goal "Execute the primary transaction"
+            --goal "Execute the primary transaction" $AUDIT_EXTRA_ARGS
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
           # A second pass writes the machine-readable report for the summary and
           # for any downstream job that wants the numbers.
+          # shellcheck disable=SC2086
           node packages/cli/dist/cli.js audit "$TARGET_URL" \
             --threshold "$THRESHOLD" \
             --format json \
             --output agentgrade-report.json \
-            --quiet
+            --quiet $AUDIT_EXTRA_ARGS
           set -e
 
       - name: Write the job summary
