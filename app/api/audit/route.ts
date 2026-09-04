@@ -1,3 +1,4 @@
+import { acquireAuditSlot, isAuthorised, maxConcurrent } from '@/src/lib/api-guard';
 import { checkHost, privateTargetsAllowed } from '@/src/lib/net-guard';
 import { streamAuditPipeline } from '@/src/lib/pipeline';
 import { getReportStore } from '@/src/lib/store';
@@ -27,6 +28,14 @@ export interface AuditRequestBody {
  * still persisted and reachable at `/report/<id>`.
  */
 export async function POST(request: Request): Promise<Response> {
+  // Authentication first: an unauthenticated caller should learn nothing about
+  // the target, not even whether it parsed.
+  if (!isAuthorised(request)) {
+    return jsonError('Missing or invalid bearer token.', 401, {
+      'www-authenticate': 'Bearer realm="agentgrade"',
+    });
+  }
+
   let body: AuditRequestBody;
   try {
     body = (await request.json()) as AuditRequestBody;
@@ -57,13 +66,37 @@ export async function POST(request: Request): Promise<Response> {
     }
   }
 
-  const stream = streamAuditPipeline(target.url, {
-    syntheticGoal: typeof body.syntheticGoal === 'string' ? body.syntheticGoal : undefined,
-    scanner:
-      typeof body.navigationTimeoutMs === 'number'
-        ? { navigationTimeoutMs: body.navigationTimeoutMs }
-        : undefined,
-  });
+  // Every audit past this point holds a browser for as long as it runs, so the
+  // slot is taken before the pipeline starts and released when the stream ends
+  // — not when this function returns, which happens immediately.
+  const slot = acquireAuditSlot();
+  if (!slot) {
+    return jsonError(
+      `The studio is already running ${maxConcurrent()} audit(s). Each one holds a browser, so they are not queued. Retry shortly.`,
+      429,
+      { 'retry-after': '30' },
+    );
+  }
+
+  let stream: ReadableStream<Uint8Array>;
+  try {
+    stream = streamAuditPipeline(target.url, {
+      syntheticGoal: typeof body.syntheticGoal === 'string' ? body.syntheticGoal : undefined,
+      scanner:
+        typeof body.navigationTimeoutMs === 'number'
+          ? { navigationTimeoutMs: body.navigationTimeoutMs }
+          : undefined,
+      // Released when the *audit* finishes, not when the stream is consumed.
+      // A client that disconnects does not cancel the run, so releasing on
+      // cancel would free the slot while the browser is still open — and a
+      // caller that opens connections and drops them is exactly the shape of
+      // request this limit exists to stop.
+      onSettled: () => slot.release(),
+    });
+  } catch (error) {
+    slot.release();
+    throw error;
+  }
 
   return new Response(stream, {
     headers: {
@@ -77,6 +110,15 @@ export async function POST(request: Request): Promise<Response> {
 
 /** Returns the most recent audits, newest first. */
 export async function GET(request: Request): Promise<Response> {
+  // The listing carries every URL this studio has scanned, which on a shared
+  // deployment is a record of what its users are working on. It sits behind the
+  // same token as the audit itself.
+  if (!isAuthorised(request)) {
+    return jsonError('Missing or invalid bearer token.', 401, {
+      'www-authenticate': 'Bearer realm="agentgrade"',
+    });
+  }
+
   const limit = Number(new URL(request.url).searchParams.get('limit') ?? '20');
   const reports = getReportStore().list(Number.isFinite(limit) ? limit : 20);
   return Response.json({ reports });
@@ -103,6 +145,6 @@ function normaliseTarget(input: string): { ok: true; url: string } | { ok: false
   return { ok: true, url: parsed.toString() };
 }
 
-function jsonError(message: string, status: number): Response {
-  return Response.json({ error: message }, { status });
+function jsonError(message: string, status: number, headers?: Record<string, string>): Response {
+  return Response.json({ error: message }, { status, headers });
 }

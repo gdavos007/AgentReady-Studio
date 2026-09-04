@@ -130,12 +130,32 @@ export interface DescriptorProbe {
   json: JsonValue | null;
   /** Byte length of the untruncated body. */
   byteLength: number;
+  /**
+   * True when the response exceeded {@link MAX_DESCRIPTOR_TRANSFER_BYTES} and
+   * was refused. `body` and `json` are null in that case: a partial descriptor
+   * would score as malformed, which is a different finding from an oversized
+   * one.
+   */
+  oversized?: boolean;
   /** Transport/parse error message, or `null` on success. */
   error: string | null;
 }
 
 /** Maximum number of body characters retained per descriptor probe. */
 export const MAX_DESCRIPTOR_BYTES = 64_000;
+
+/**
+ * Hard ceiling on what a single descriptor fetch may transfer.
+ *
+ * `MAX_DESCRIPTOR_BYTES` bounds what is *retained*; this bounds what is *read*.
+ * Without it, `/.well-known/mcp` answering with an endless body is a
+ * remote-triggered OOM: the scanner fetches three descriptors on every scan
+ * from an origin it does not control, so the target chooses the size.
+ *
+ * Four times the retention cap, so a large-but-legitimate manifest is still
+ * read in full and reported as truncated rather than rejected outright.
+ */
+export const MAX_DESCRIPTOR_TRANSFER_BYTES = MAX_DESCRIPTOR_BYTES * 4;
 
 /** A declarative WebMCP annotation found in the served markup. */
 export interface DeclarativeToolTag {
@@ -545,6 +565,27 @@ export interface ScannerOptions {
    * Defaults to `AGENTGRADE_NO_SANDBOX=1` when unset.
    */
   disableSandbox?: boolean;
+  /**
+   * Serve the page with its Content-Security-Policy disabled.
+   *
+   * Off by default. The scanner injects init scripts, and a target's CSP is
+   * one of the few things standing between a hostile page and those scripts'
+   * privileges; disabling it site-wide to make instrumentation marginally
+   * easier trades a real boundary for a convenience. Enabling it records a
+   * `csp-bypassed` warning in the report so a scan run this way is never
+   * mistaken for a normal one.
+   */
+  bypassCsp?: boolean;
+  /**
+   * Accept invalid, expired, and self-signed TLS certificates.
+   *
+   * Off by default. The audit reports on a site's agent readiness, and a
+   * report gathered over a connection that was not authenticated is a report
+   * about whatever answered — the scanner cannot tell the reader which. Enable
+   * it only for a staging host with a known-bad certificate; it records a
+   * `tls-errors-ignored` warning.
+   */
+  ignoreHttpsErrors?: boolean;
   /** Skip `/.well-known/*` and `/llms.txt` probing. Default `false`. */
   skipDescriptors?: boolean;
   /** Reuse an already-launched browser instead of launching one. */

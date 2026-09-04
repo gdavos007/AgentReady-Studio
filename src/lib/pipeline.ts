@@ -50,6 +50,17 @@ export interface AuditPipelineOptions {
   store?: ReportStore;
   /** Id override, for reproducible tests. */
   id?: string;
+  /**
+   * Fires once the audit has finished and released its browser, however it
+   * finished.
+   *
+   * Distinct from the stream closing. A client that disconnects mid-run does
+   * not cancel the audit — see {@link streamAuditPipeline} — so anything the
+   * caller holds *on behalf of the running browser* has to be released from
+   * here, not from the stream's lifecycle. Releasing it when the reader goes
+   * away would free the resource while the browser is still open.
+   */
+  onSettled?: () => void;
 }
 
 /**
@@ -174,6 +185,14 @@ export function streamAuditPipeline(url: string, options: AuditPipelineOptions =
         };
         write(failed);
       } finally {
+        // Before closing the controller: the audit and its browser are done
+        // at this point, which is what a caller holding a concurrency slot is
+        // actually waiting on.
+        try {
+          options.onSettled?.();
+        } catch {
+          /* a sink's bookkeeping must not break the stream */
+        }
         try {
           controller.close();
         } catch {

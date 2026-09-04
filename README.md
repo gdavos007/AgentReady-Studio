@@ -68,7 +68,7 @@ npm install
 npx playwright install chromium
 
 npm run dev        # studio at http://localhost:3000
-npm test           # 185 tests, real Chromium against a loopback fixture
+npm test           # 241 tests, real Chromium against a loopback fixture
 npm run build:all  # engine → CLI → React SDK → studio
 ```
 
@@ -96,6 +96,47 @@ or `allowPrivateTargets: true` on `scanUrl`.
 Chromium runs **with** its sandbox and with Site Isolation intact. Unprivileged
 containers that cannot provide user namespaces opt out explicitly, with
 `AGENTGRADE_NO_SANDBOX=1`, `--no-sandbox`, or `disableSandbox: true`.
+
+The target's Content-Security-Policy and its TLS certificate are both enforced
+by default. `--bypass-csp` and `--ignore-https-errors` (or `bypassCsp` /
+`ignoreHttpsErrors` on `scanUrl`) switch them off for a staging host that needs
+it; either one records a `csp-bypassed` or `tls-errors-ignored` warning in the
+report, so a scan run with the guardrails down is never mistaken for a clean
+one.
+
+### Resource limits
+
+A scan reads from an origin that chooses how much it sends back, so the sizes
+are decided here rather than there:
+
+| Limit | Value | What it bounds |
+| --- | ---: | --- |
+| `totalTimeoutMs` | 60 s | Whole scan, enforced as one deadline across every stage — not a sum of per-step budgets |
+| Descriptor transfer | 256 KB | One `/.well-known/*` or `/llms.txt` fetch; refused on `content-length`, and a chunked body is abandoned at the ceiling |
+| Descriptor retention | 64 KB | How much of a descriptor is kept in the report |
+| Served HTML | 2 M chars | Markup pulled into Node for the static pass; measured in the renderer so an inflated DOM never crosses |
+
+Truncation is reported, never silent: an oversized descriptor is marked
+`oversized` rather than half-parsed, and a capped document adds a
+`served-html-truncated` warning, because a missing `<tool-definition>` should
+not read as "not there" when it means "past the cap".
+
+### Running the studio
+
+`npm run dev` and `npm start` bind to `127.0.0.1`. An audit launches a real
+browser and holds it for minutes, so the endpoint is far more expensive to
+serve than to call — exposing it on `0.0.0.0` hands anyone who can reach it a
+browser aimed wherever they like.
+
+If you do deploy it somewhere reachable:
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `AGENTGRADE_TOKEN` | unset | When set, `POST` and `GET /api/audit` require `Authorization: Bearer <token>` |
+| `AGENTGRADE_MAX_CONCURRENT` | `2` | Concurrent audits; further requests get `429` with `Retry-After` rather than queueing |
+
+Requests are not queued on purpose: queueing turns a burst into a pile of
+connections held open for minutes that time out at the client anyway.
 
 ### CLI
 
@@ -417,7 +458,7 @@ A soft navigation timeout that still rendered usable DOM is inspected anyway.
 ```bash
 npm install
 npm run typecheck
-npm test            # 185 tests, real Chromium against a loopback fixture server
+npm test            # 241 tests, real Chromium against a loopback fixture server
 npm run build       # engine (tsc → dist/)
 npm run build:cli   # @agentgrade/cli (esbuild bundle)
 npm run build:react # @agentgrade/react (tsc → declarations)

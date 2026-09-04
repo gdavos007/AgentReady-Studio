@@ -43,6 +43,10 @@ export interface RunAuditOptions {
   allowPrivateTargets?: boolean;
   /** Launch Chromium with `--no-sandbox`. Only for unprivileged containers. */
   disableSandbox?: boolean;
+  /** Disable the target's CSP. Records a `csp-bypassed` warning in the report. */
+  bypassCsp?: boolean;
+  /** Accept invalid TLS certificates. Records a `tls-errors-ignored` warning. */
+  ignoreHttpsErrors?: boolean;
 }
 
 /** The outcome of one CLI audit. */
@@ -79,6 +83,10 @@ export async function runAudit(url: string, options: RunAuditOptions): Promise<A
       ? { allowPrivateTargets: options.allowPrivateTargets }
       : {}),
     ...(options.disableSandbox !== undefined ? { disableSandbox: options.disableSandbox } : {}),
+    ...(options.bypassCsp !== undefined ? { bypassCsp: options.bypassCsp } : {}),
+    ...(options.ignoreHttpsErrors !== undefined
+      ? { ignoreHttpsErrors: options.ignoreHttpsErrors }
+      : {}),
     onDiagnostic: (diagnostic: ScanDiagnostic) => {
       if (diagnostic.level === 'error') options.onProgress?.(`error: ${diagnostic.message}`);
     },

@@ -25,6 +25,8 @@ agentgrade audit <url> [options]
 | `--max-issues <n>` | How many issues to show. |
 | `--allow-private` | Permit private, loopback and link-local targets. Off by default, so a CI job handed a URL cannot pivot into the runner's network. Also `AGENTGRADE_ALLOW_PRIVATE_TARGETS=1`. |
 | `--no-sandbox` | Launch Chromium without its sandbox. Only for unprivileged containers. Also `AGENTGRADE_NO_SANDBOX=1`. |
+| `--bypass-csp` | Disable the target's Content-Security-Policy. Records a `csp-bypassed` warning in the report. |
+| `--ignore-https-errors` | Accept invalid or self-signed TLS certificates. Records a `tls-errors-ignored` warning. |
 | `--no-color` | Disable ANSI colour. `NO_COLOR` is also honoured. |
 | `--quiet` | Suppress progress output on stderr. |
 

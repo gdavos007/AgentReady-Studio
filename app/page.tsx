@@ -97,6 +97,12 @@ export default async function HomePage() {
           — which are served from this machine — start it with{' '}
           <span className="font-mono">AGENTGRADE_ALLOW_PRIVATE_TARGETS=1 npm run dev</span>.
         </p>
+        <p className="mt-2">
+          The studio binds to <span className="font-mono">127.0.0.1</span> and runs at most two
+          audits at once, since each one holds a browser. Deploying it somewhere reachable? Set{' '}
+          <span className="font-mono">AGENTGRADE_TOKEN</span> to require a bearer token on{' '}
+          <span className="font-mono">/api/audit</span>.
+        </p>
       </footer>
     </main>
   );

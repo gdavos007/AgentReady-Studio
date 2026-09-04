@@ -73,6 +73,8 @@ export const DEFAULT_OPTIONS = {
   timezoneId: 'America/New_York',
   skipDescriptors: false,
   enableCdp: true,
+  bypassCsp: false,
+  ignoreHttpsErrors: false,
 } as const;
 
 /**
@@ -148,9 +150,36 @@ const nowIso = (): string => new Date().toISOString();
 const isTimeoutError = (error: unknown): boolean =>
   error instanceof Error && (error.name === 'TimeoutError' || /timeout/i.test(error.message));
 
-/** Rejects with a `TimeoutError`-shaped error if `promise` outlives `ms`. */
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+/**
+ * Rejects with a `TimeoutError`-shaped error if `promise` outlives `ms`, or as
+ * soon as `deadline` fires — whichever comes first.
+ *
+ * The deadline is the part that matters. Per-step budgets alone do not bound a
+ * scan: each step is floored at a second so it always gets a chance to run, and
+ * `page.goto` carries its own navigation timeout, so a target that stalls every
+ * stage a little runs well past `totalTimeoutMs` in aggregate. Threading one
+ * `AbortSignal` through every awaited step makes the total an actual ceiling
+ * rather than the sum of a dozen optimistic ones.
+ */
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+  deadline?: AbortSignal,
+): Promise<T> {
+  // Claimed first, before any early return. The losing side of the race is
+  // abandoned rather than cancelled — a `page.evaluate` we stopped waiting for
+  // still rejects when the context closes — and an abandoned rejection with no
+  // handler is an unhandled rejection that can take the process down. Note
+  // that `promise` was already created by the caller evaluating the argument,
+  // so bailing out below without attaching this would leak one.
+  promise.catch(() => undefined);
+
+  if (deadline?.aborted) throw budgetExpired(label);
+
   let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
+
   try {
     return await Promise.race([
       promise,
@@ -161,18 +190,82 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
           reject(error);
         }, ms);
         if (typeof timer.unref === 'function') timer.unref();
+
+        if (deadline) {
+          onAbort = (): void => reject(budgetExpired(label));
+          deadline.addEventListener('abort', onAbort, { once: true });
+        }
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (deadline && onAbort) deadline.removeEventListener('abort', onAbort);
   }
+}
+
+/**
+ * Upper bound on the served HTML retained for the static discovery pass.
+ *
+ * The static pass regex-scans this markup for declarative annotations; two
+ * megabytes is far past any real document's head-and-body markup, and the
+ * annotations it looks for appear in the authored source, not after a
+ * megabyte of inlined base64.
+ */
+export const MAX_SERVED_HTML_CHARS = 2_000_000;
+
+/**
+ * Reads the page's HTML with the size decided here rather than by the target.
+ *
+ * `page.content()` serialises the whole document and ships every byte across
+ * the CDP boundary into this process, so a page that generates a gigabyte of
+ * markup — trivially, a loop appending nodes — is a remote-triggered OOM in the
+ * scanner, not in the browser that is sandboxed and disposable.
+ *
+ * So the length is measured in the renderer first and only a bounded prefix
+ * ever crosses. The count is taken from `documentElement.outerHTML.length`
+ * because that is the exact string `page.content()` would have returned;
+ * element counts are cheaper but do not bound the byte size of one enormous
+ * attribute or text node.
+ */
+export async function readServedHtml(page: Page, log?: DiagnosticLog): Promise<string> {
+  const result = await page.evaluate((limit: number) => {
+    const root = document.documentElement;
+    if (!root) return { html: '', length: 0, truncated: false };
+    const html = root.outerHTML;
+    return {
+      html: html.length > limit ? html.slice(0, limit) : html,
+      length: html.length,
+      truncated: html.length > limit,
+    };
+  }, MAX_SERVED_HTML_CHARS);
+
+  if (result.truncated) {
+    // Not silent: the static discovery pass scans this markup for declarative
+    // annotations, so a reader has to know that a missing `<tool-definition>`
+    // might mean "past the cap" rather than "not there".
+    log?.add(
+      'warning',
+      'dom',
+      'served-html-truncated',
+      `Document was ${result.length} characters; only the first ${MAX_SERVED_HTML_CHARS} were scanned for declarative annotations.`,
+    );
+  }
+
+  return result.html;
+}
+
+/** The error raised when the whole-scan budget runs out mid-step. */
+function budgetExpired(label: string): Error {
+  const error = new Error(`${label} abandoned: the total scan budget expired`);
+  error.name = 'TimeoutError';
+  return error;
 }
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message.split('\n')[0] : String(error);
 
 /** Accumulates diagnostics and exposes the counters the summary needs. */
-class DiagnosticLog {
+export class DiagnosticLog {
   readonly entries: ScanDiagnostic[] = [];
 
   constructor(private readonly sink?: (diagnostic: ScanDiagnostic) => void) {}
@@ -221,9 +314,31 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
     timezoneId: options.timezoneId ?? DEFAULT_OPTIONS.timezoneId,
     skipDescriptors: options.skipDescriptors ?? DEFAULT_OPTIONS.skipDescriptors,
     enableCdp: options.enableCdp ?? DEFAULT_OPTIONS.enableCdp,
+    bypassCsp: options.bypassCsp ?? DEFAULT_OPTIONS.bypassCsp,
+    ignoreHttpsErrors: options.ignoreHttpsErrors ?? DEFAULT_OPTIONS.ignoreHttpsErrors,
     extraHttpHeaders: options.extraHttpHeaders ?? {},
     allowPrivateTargets: privateTargetsAllowed(options.allowPrivateTargets),
   };
+
+  // Both of these weaken a boundary the scan otherwise relies on, and both are
+  // invisible in the finished report unless the report says so. A reader has to
+  // be able to tell a clean scan from one gathered with the guardrails down.
+  if (config.bypassCsp) {
+    log.add(
+      'warning',
+      'launch',
+      'csp-bypassed',
+      "Content-Security-Policy was disabled for this scan; the target's script restrictions were not in force.",
+    );
+  }
+  if (config.ignoreHttpsErrors) {
+    log.add(
+      'warning',
+      'launch',
+      'tls-errors-ignored',
+      'TLS certificate errors were ignored for this scan; the identity of the host that answered was not verified.',
+    );
+  }
 
   const normalisedUrl = normaliseUrl(targetUrl);
   if (!normalisedUrl.ok) {
@@ -290,9 +405,9 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
       viewport: { ...config.viewport },
       locale: config.locale,
       timezoneId: config.timezoneId,
-      ignoreHTTPSErrors: true,
+      ignoreHTTPSErrors: config.ignoreHttpsErrors,
       javaScriptEnabled: true,
-      bypassCSP: true,
+      bypassCSP: config.bypassCsp,
       serviceWorkers: 'block',
       extraHTTPHeaders: { ...DEFAULT_HEADERS, ...config.extraHttpHeaders },
       ...(options.proxy ? { proxy: options.proxy } : {}),
@@ -326,8 +441,14 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
     const elapsed = (): number => Date.now() - startedAtMs;
     const remaining = (): number => Math.max(1_000, config.totalTimeoutMs - elapsed());
 
+    // The hard ceiling for everything below. `remaining()` still sizes each
+    // step so a well-behaved target is not cut off early, but this is what
+    // makes `totalTimeoutMs` a ceiling rather than the sum of a dozen
+    // optimistic per-step budgets.
+    const deadline = AbortSignal.timeout(remaining());
+
     /* ---- Navigation --------------------------------------------------- */
-    const navigation = await navigate(page, url, config, log);
+    const navigation = await navigate(page, url, config, log, deadline);
 
     if (navigation.status === 'timeout-hard' || navigation.status === 'network-error') {
       return failedReport({
@@ -351,7 +472,12 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
     /* ---- Served HTML (for the static discovery pass) ------------------- */
     let servedHtml = '';
     try {
-      servedHtml = await withTimeout(page.content(), Math.min(10_000, remaining()), 'page.content()');
+      servedHtml = await withTimeout(
+        readServedHtml(page, log),
+        Math.min(10_000, remaining()),
+        'page.content()',
+        deadline,
+      );
     } catch (error) {
       log.add('warning', 'dom', 'content-read-failed', messageOf(error));
     }
@@ -360,10 +486,15 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
     const settleStart = Date.now();
     let runtimeReady = false;
     try {
-      await page.waitForFunction(MODEL_CONTEXT_READY_EXPRESSION, undefined, {
-        timeout: Math.min(config.modelContextTimeoutMs, remaining()),
-        polling: 100,
-      });
+      await withTimeout(
+        page.waitForFunction(MODEL_CONTEXT_READY_EXPRESSION, undefined, {
+          timeout: Math.min(config.modelContextTimeoutMs, remaining()),
+          polling: 100,
+        }),
+        Math.min(config.modelContextTimeoutMs, remaining()) + 500,
+        'WebMCP settle wait',
+        deadline,
+      );
       runtimeReady = true;
     } catch (error) {
       if (isTimeoutError(error)) {
@@ -381,6 +512,7 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
         page.evaluate(inspectAgentSurface),
         Math.min(20_000, remaining()),
         'DOM inspection',
+        deadline,
       );
     } catch (error) {
       log.add('error', 'dom', 'dom-inspection-failed', messageOf(error));
@@ -401,6 +533,7 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
           probeAllDescriptors(context.request as unknown as FetchLike, origin, config.descriptorTimeoutMs),
           Math.min(config.descriptorTimeoutMs * 3, remaining()),
           'descriptor probing',
+          deadline,
         );
       } catch (error) {
         log.add('warning', 'descriptors', 'descriptor-probe-failed', messageOf(error));
@@ -599,6 +732,7 @@ async function navigate(
   url: string,
   config: { navigationTimeoutMs: number; networkIdleTimeoutMs: number },
   log: DiagnosticLog,
+  deadline?: AbortSignal,
 ): Promise<NavigationOutcome> {
   const start = Date.now();
   const outcome: NavigationOutcome = {
@@ -616,7 +750,12 @@ async function navigate(
 
   let response: Response | null = null;
   try {
-    response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.navigationTimeoutMs });
+    response = await withTimeout(
+      page.goto(url, { waitUntil: 'domcontentloaded', timeout: config.navigationTimeoutMs }),
+      config.navigationTimeoutMs + 1_000,
+      'navigation',
+      deadline,
+    );
   } catch (error) {
     outcome.durationMs = Date.now() - start;
     outcome.error = messageOf(error);
@@ -629,6 +768,7 @@ async function navigate(
         ),
         2_000,
         'post-timeout readiness probe',
+        deadline,
       ).catch(() => false);
       outcome.status = usable ? 'timeout-soft' : 'timeout-hard';
       log.add(
@@ -655,7 +795,12 @@ async function navigate(
   }
 
   try {
-    await page.waitForLoadState('networkidle', { timeout: config.networkIdleTimeoutMs });
+    await withTimeout(
+      page.waitForLoadState('networkidle', { timeout: config.networkIdleTimeoutMs }),
+      config.networkIdleTimeoutMs + 1_000,
+      'network idle wait',
+      deadline,
+    );
   } catch (error) {
     if (outcome.status === 'loaded') outcome.status = 'timeout-soft';
     log.add(

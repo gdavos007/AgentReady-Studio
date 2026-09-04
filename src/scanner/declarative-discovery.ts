@@ -14,18 +14,35 @@ import type {
   ToolInputSchema,
   ToolSource,
 } from './types.js';
-import { MAX_DESCRIPTOR_BYTES } from './types.js';
+import { MAX_DESCRIPTOR_BYTES, MAX_DESCRIPTOR_TRANSFER_BYTES } from './types.js';
 
 /** Minimal structural view of Playwright's `APIRequestContext`. */
 export interface FetchLike {
   get(
     url: string,
     options?: { timeout?: number; failOnStatusCode?: boolean; maxRedirects?: number; headers?: Record<string, string> },
-  ): Promise<{
-    status(): number;
-    headers(): Record<string, string>;
-    text(): Promise<string>;
-  }>;
+  ): Promise<FetchLikeResponse>;
+}
+
+/**
+ * The response shape {@link probeDescriptor} needs.
+ *
+ * `body` and `dispose` are optional because they are how a transport signals
+ * what it can do. Playwright's `APIRequestContext` has already buffered the
+ * response by the time `get()` resolves, so for that transport the ceiling is
+ * enforced on what is *retained*; a transport that exposes a byte stream via
+ * `stream()` gets the ceiling enforced at the socket instead, and stops
+ * reading. `dispose()` releases Playwright's copy as soon as we are done with
+ * it rather than at context close.
+ */
+export interface FetchLikeResponse {
+  status(): number;
+  headers(): Record<string, string>;
+  text(): Promise<string>;
+  /** Releases a buffered body early, where the transport holds one. */
+  dispose?(): Promise<void>;
+  /** Incremental body, for transports that do not pre-buffer. */
+  stream?(): AsyncIterable<Uint8Array>;
 }
 
 /** The descriptors probed on every scan, in a fixed order. */
@@ -37,6 +54,76 @@ export const DESCRIPTOR_PATHS: ReadonlyArray<{ kind: DescriptorProbe['kind']; pa
 
 const truncate = (value: string): string =>
   value.length > MAX_DESCRIPTOR_BYTES ? value.slice(0, MAX_DESCRIPTOR_BYTES) : value;
+
+/** Outcome of reading one descriptor body under the transfer ceiling. */
+interface BodyRead {
+  text: string;
+  byteLength: number;
+  oversized: boolean;
+}
+
+/**
+ * Parses `content-length` into a number, or `null` when it is absent or not a
+ * plain non-negative integer.
+ *
+ * Deliberately strict: a header of `100, 100` (duplicated upstream) or `1e9`
+ * must not be read as a small number, because the whole point of this check is
+ * to refuse before the body arrives.
+ */
+export function parseContentLength(headers: Record<string, string>): number | null {
+  const raw = headers['content-length'];
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw.trim())) return null;
+  const value = Number(raw.trim());
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * Reads a descriptor body without letting the target choose how much memory the
+ * scanner spends.
+ *
+ * Three layers, cheapest first:
+ *
+ *  1. A declared `content-length` over the ceiling is refused before the body
+ *    is touched at all.
+ *  2. A transport that streams is read incrementally and abandoned the moment
+ *    it crosses the ceiling, so a chunked response with no declared length —
+ *    the case a `content-length` check cannot see — is bounded too.
+ *  3. Otherwise the length is enforced on the string the transport hands back.
+ *    Playwright's `APIRequestContext` buffers before `get()` resolves, so for
+ *    that transport this is the retention bound, not a transfer bound; the
+ *    `content-length` check above is what covers the honest-server case there.
+ *
+ * An oversized body is discarded rather than truncated: half a manifest parses
+ * as malformed JSON, which would be reported as a schema problem the site does
+ * not have.
+ */
+async function readBody(response: FetchLikeResponse, maxBytes: number): Promise<BodyRead> {
+  const declared = parseContentLength(response.headers());
+  if (declared !== null && declared > maxBytes) {
+    return { text: '', byteLength: declared, oversized: true };
+  }
+
+  if (typeof response.stream === 'function') {
+    let received = 0;
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of response.stream()) {
+      received += chunk.byteLength;
+      if (received > maxBytes) return { text: '', byteLength: received, oversized: true };
+      chunks.push(chunk);
+    }
+    return {
+      text: Buffer.concat(chunks).toString('utf8'),
+      byteLength: received,
+      oversized: false,
+    };
+  }
+
+  const text = await response.text();
+  if (text.length > maxBytes) {
+    return { text: '', byteLength: text.length, oversized: true };
+  }
+  return { text, byteLength: text.length, oversized: false };
+}
 
 const safeParseJson = (text: string): JsonValue | null => {
   const trimmed = text.trim();
@@ -119,8 +206,19 @@ export async function probeDescriptor(
       probe.status = response.status();
       const headers = response.headers();
       probe.contentType = (headers['content-type'] || '').toLowerCase() || null;
-      const text = await response.text();
-      probe.byteLength = text.length;
+
+      const read = await readBody(response, MAX_DESCRIPTOR_TRANSFER_BYTES);
+      await response.dispose?.().catch(() => undefined);
+
+      probe.byteLength = read.byteLength;
+      if (read.oversized) {
+        probe.oversized = true;
+        probe.error = `Descriptor exceeded the ${MAX_DESCRIPTOR_TRANSFER_BYTES} byte ceiling (${read.byteLength} bytes)`;
+        last = probe;
+        continue;
+      }
+
+      const text = read.text;
       probe.body = truncate(text);
 
       // A SPA that answers 200 with its HTML shell is not a descriptor.

@@ -53,6 +53,8 @@ export interface ParsedArgs {
   headers: Record<string, string>;
   allowPrivate: boolean;
   noSandbox: boolean;
+  bypassCsp: boolean;
+  ignoreHttpsErrors: boolean;
   quiet: boolean;
   maxIssues: number | null;
   color: boolean | null;
@@ -80,6 +82,10 @@ OPTIONS
                          into the runner's network. Also AGENTGRADE_ALLOW_PRIVATE_TARGETS=1.
   --no-sandbox           Launch Chromium without its sandbox. Only for
                          unprivileged containers. Also AGENTGRADE_NO_SANDBOX=1.
+  --bypass-csp           Disable the target's Content-Security-Policy.
+                         Weakens a real boundary; the report records a warning.
+  --ignore-https-errors  Accept invalid or self-signed TLS certificates.
+                         The report records that the host was not verified.
   --max-issues <number>  How many issues to show. Default 8 (pretty) / 10 (markdown).
   --no-color             Disable ANSI colour. NO_COLOR is also honoured.
   --quiet                Suppress progress output on stderr.
@@ -114,6 +120,8 @@ export function parseArgs(argv: string[]): ParsedArgs {
     headers: {},
     allowPrivate: false,
     noSandbox: false,
+    bypassCsp: false,
+    ignoreHttpsErrors: false,
     quiet: false,
     maxIssues: null,
     color: null,
@@ -209,6 +217,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       case '--no-sandbox':
         parsed.noSandbox = true;
         break;
+      case '--bypass-csp':
+        parsed.bypassCsp = true;
+        break;
+      case '--ignore-https-errors':
+        parsed.ignoreHttpsErrors = true;
+        break;
       case '--no-color':
         parsed.color = false;
         break;
@@ -295,6 +309,8 @@ export async function main(argv: string[], io: CliIo = defaultIo): Promise<numbe
       headers: Object.keys(args.headers).length > 0 ? args.headers : undefined,
       ...(args.allowPrivate ? { allowPrivateTargets: true } : {}),
       ...(args.noSandbox ? { disableSandbox: true } : {}),
+      ...(args.bypassCsp ? { bypassCsp: true } : {}),
+      ...(args.ignoreHttpsErrors ? { ignoreHttpsErrors: true } : {}),
       onProgress,
     });
   } catch (error) {
