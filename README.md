@@ -68,7 +68,7 @@ npm install
 npx playwright install chromium
 
 npm run dev        # studio at http://localhost:3000
-npm test           # 282 tests, real Chromium against a loopback fixture
+npm test           # 312 tests, real Chromium against a loopback fixture
 npm run build:all  # engine → CLI → React SDK → studio
 ```
 
@@ -162,7 +162,13 @@ goes to stderr, so `scan-corpus sites.txt > corpus.csv` produces a clean table.
 
 A single audit answers "is this site ready?". A corpus answers whether the score
 *discriminates* — if every site lands in the same band, the metric is not
-measuring anything. Details in [`packages/cli/README.md`](packages/cli/README.md).
+measuring anything.
+
+`--respect-robots` consults `/robots.txt` before Chromium launches and records a
+target that disallows us as `robots-disallowed` rather than scanning it. Off by
+default, so local fixtures and your own staging box audit unblocked; worth
+turning on for a corpus over sites that did not ask to be measured. Details in
+[`packages/cli/README.md`](packages/cli/README.md).
 
 ### CI/CD
 
@@ -473,7 +479,7 @@ A soft navigation timeout that still rendered usable DOM is inspected anyway.
 ```bash
 npm install
 npm run typecheck
-npm test            # 282 tests, real Chromium against a loopback fixture server
+npm test            # 312 tests, real Chromium against a loopback fixture server
 npm run build       # engine (tsc → dist/)
 npm run build:cli   # @agentgrade/cli (esbuild bundle)
 npm run build:react # @agentgrade/react (tsc → declarations)

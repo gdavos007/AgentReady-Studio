@@ -24,8 +24,13 @@ import type { AgentScorecard, Grade, PillarId } from './types.js';
  * a site that refused *this* client and might yield to a different approach,
  * while an unreachable host is a row to drop from the sample. Lumping both into
  * `failed` would put a systematic bias in a corpus and hide it.
+ *
+ * `robots-disallowed` is a third kind again, and the most important one to keep
+ * separate: the site was reachable and we chose not to look. Counting it as a
+ * failure would understate coverage, and counting it as a scan would claim a
+ * measurement that was never taken.
  */
-export type CorpusStatus = 'ok' | 'partial' | 'bot-blocked' | 'unreachable';
+export type CorpusStatus = 'ok' | 'partial' | 'bot-blocked' | 'robots-disallowed' | 'unreachable';
 
 /** One row of a corpus scan. Every field is a scalar, ready for a CSV cell. */
 export interface CorpusRow {
@@ -141,6 +146,12 @@ function round(value: number, places: number): number | null {
 export function classifyScan(report: AuditReport): CorpusStatus {
   const { navigation } = report.data;
 
+  // Checked first: the scan stopped before a browser ran, so every other signal
+  // below is absent by construction and would otherwise read as "unreachable".
+  if (report.data.diagnostics.some((entry) => entry.code === 'robots-disallowed')) {
+    return 'robots-disallowed';
+  }
+
   if (navigation.botWallDetected) return 'bot-blocked';
 
   if (
@@ -200,10 +211,11 @@ const STRUCTURAL_COLUMNS: ReadonlyArray<keyof CorpusRow> = [
 /**
  * Blanks the columns a given status cannot support.
  *
- * `unreachable` loses everything: nothing was measured. `bot-blocked` keeps its
- * structural counts — the wall is a real document and its shape is a real
- * observation — but loses the score and the economics, which would otherwise
- * read as a verdict on a site the scanner never saw.
+ * `unreachable` and `robots-disallowed` lose everything: nothing was measured,
+ * in one case because nothing answered and in the other because we did not ask.
+ * `bot-blocked` keeps its structural counts — the wall is a real document and
+ * its shape is a real observation — but loses the score and the economics,
+ * which would otherwise read as a verdict on a site the scanner never saw.
  */
 function blankUnmeasured(row: CorpusRow): CorpusRow {
   if (row.status === 'ok' || row.status === 'partial') return row;
@@ -212,7 +224,7 @@ function blankUnmeasured(row: CorpusRow): CorpusRow {
   for (const column of UNMEASURED_COLUMNS) {
     (blanked as unknown as Record<string, unknown>)[column] = null;
   }
-  if (row.status === 'unreachable') {
+  if (row.status === 'unreachable' || row.status === 'robots-disallowed') {
     for (const column of STRUCTURAL_COLUMNS) {
       (blanked as unknown as Record<string, unknown>)[column] = null;
     }

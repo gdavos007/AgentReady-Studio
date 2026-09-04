@@ -47,6 +47,8 @@ export interface RunAuditOptions {
   bypassCsp?: boolean;
   /** Accept invalid TLS certificates. Records a `tls-errors-ignored` warning. */
   ignoreHttpsErrors?: boolean;
+  /** Consult `/robots.txt` and refuse a target it disallows. */
+  respectRobots?: boolean;
 }
 
 /** The outcome of one CLI audit. */
@@ -87,6 +89,7 @@ export async function runAudit(url: string, options: RunAuditOptions): Promise<A
     ...(options.ignoreHttpsErrors !== undefined
       ? { ignoreHttpsErrors: options.ignoreHttpsErrors }
       : {}),
+    ...(options.respectRobots !== undefined ? { respectRobots: options.respectRobots } : {}),
     onDiagnostic: (diagnostic: ScanDiagnostic) => {
       if (diagnostic.level === 'error') options.onProgress?.(`error: ${diagnostic.message}`);
     },

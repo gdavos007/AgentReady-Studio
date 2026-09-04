@@ -578,6 +578,21 @@ describe('agentgrade scan-corpus', () => {
     expect(args.out).toBe('corpus.csv');
   });
 
+  it('parses --respect-robots, defaulting it off', async () => {
+    const { parseArgs } = await import('../packages/cli/src/cli.js');
+
+    expect(parseArgs(['scan-corpus', 'a.test']).respectRobots).toBe(false);
+    expect(parseArgs(['scan-corpus', 'a.test', '--respect-robots']).respectRobots).toBe(true);
+    // Accepted on a single audit too, not just a corpus run.
+    expect(parseArgs(['audit', 'a.test', '--respect-robots']).respectRobots).toBe(true);
+  });
+
+  it('lists --respect-robots in the help output', async () => {
+    const { io, out } = captureIo();
+    await main(['--help'], io);
+    expect(out.join('')).toContain('--respect-robots');
+  });
+
   it('lists scan-corpus in the help output', async () => {
     const { io, out } = captureIo();
     await main(['--help'], io);

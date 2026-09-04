@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 
 import { gradeFor } from '../shared/grade.js';
 import { checkHost, checkRequestUrl, privateTargetsAllowed } from '../lib/net-guard.js';
+import { checkRobots } from '../lib/robots.js';
 import { chromium, type Browser, type BrowserContext, type Page, type Response, type Route } from 'playwright';
 
 import {
@@ -73,6 +74,7 @@ export const DEFAULT_OPTIONS = {
   timezoneId: 'America/New_York',
   skipDescriptors: false,
   enableCdp: true,
+  respectRobots: false,
   bypassCsp: false,
   ignoreHttpsErrors: false,
 } as const;
@@ -313,6 +315,7 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
     locale: options.locale ?? DEFAULT_OPTIONS.locale,
     timezoneId: options.timezoneId ?? DEFAULT_OPTIONS.timezoneId,
     skipDescriptors: options.skipDescriptors ?? DEFAULT_OPTIONS.skipDescriptors,
+    respectRobots: options.respectRobots ?? DEFAULT_OPTIONS.respectRobots,
     enableCdp: options.enableCdp ?? DEFAULT_OPTIONS.enableCdp,
     bypassCsp: options.bypassCsp ?? DEFAULT_OPTIONS.bypassCsp,
     ignoreHttpsErrors: options.ignoreHttpsErrors ?? DEFAULT_OPTIONS.ignoreHttpsErrors,
@@ -374,6 +377,29 @@ export async function scanUrl(targetUrl: string, options: ScannerOptions = {}): 
         viewport: config.viewport,
         log,
         navigationError: guard,
+        navigationStatus: 'blocked',
+      });
+    }
+  }
+
+  // Robots is consulted *after* the SSRF guard and *before* the browser: the
+  // probe is itself an outbound request to a caller-supplied host, so it must
+  // not run against a target the guard would have refused, and checking it
+  // after navigation would have already made the request robots asked us not
+  // to make.
+  if (config.respectRobots) {
+    const verdict = await checkRobots(url, options.robotsFetcher);
+    if (!verdict.allowed) {
+      log.add('error', 'navigate', 'robots-disallowed', verdict.reason ?? 'Disallowed by robots.txt.');
+      return failedReport({
+        requestedUrl: url,
+        origin: originOf(url),
+        startedAt,
+        startedAtMs,
+        userAgent: config.userAgent,
+        viewport: config.viewport,
+        log,
+        navigationError: verdict.reason,
         navigationStatus: 'blocked',
       });
     }

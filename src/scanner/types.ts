@@ -586,12 +586,31 @@ export interface ScannerOptions {
    * `tls-errors-ignored` warning.
    */
   ignoreHttpsErrors?: boolean;
+  /**
+   * Consult `/robots.txt` and refuse a target it disallows.
+   *
+   * Off by default: the studio's own fixtures and a developer auditing their
+   * own staging box are not crawling, and a scanner that silently refused them
+   * would be baffling. A corpus run over sites that did not ask to be measured
+   * is the case this exists for.
+   *
+   * Checked before Chromium launches — the point of respecting robots is to not
+   * make the request, and a check after navigation has already made it.
+   */
+  respectRobots?: boolean;
   /** Skip `/.well-known/*` and `/llms.txt` probing. Default `false`. */
   skipDescriptors?: boolean;
   /** Reuse an already-launched browser instead of launching one. */
   browser?: PlaywrightBrowserLike;
   /** Enable the Chrome DevTools Protocol session. Default `true`. */
   enableCdp?: boolean;
+  /**
+   * Overrides how `/robots.txt` is fetched when {@link respectRobots} is on.
+   *
+   * Injected for tests, so the rule matching can be exercised without a network
+   * round trip. Returns `null` for a transport failure.
+   */
+  robotsFetcher?: (robotsUrl: string) => Promise<{ status: number; text: string } | null>;
   /** Sink for verbose progress logs. Defaults to a no-op. */
   onDiagnostic?: (diagnostic: ScanDiagnostic) => void;
 }

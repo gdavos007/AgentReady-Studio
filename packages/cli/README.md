@@ -48,6 +48,7 @@ that tells you whether a score discriminates at all.
 | `--delay <ms>` | `1000` | Spacing between requests to the **same** host. Different hosts never wait on each other. |
 | `--timeout <ms>` | `45000` | Per-site budget. |
 | `--out <path>` | stdout | `.json` emits JSON; anything else CSV. |
+| `--respect-robots` | off | Check `/robots.txt` before launching a browser; skip a target that disallows us. |
 
 Targets come from a file (one per line, `#` comments and a CSV first column both
 work), from positional URLs, or both. Bare hostnames get `https://`. Duplicates
@@ -63,6 +64,7 @@ distribution you are computing.
 | `ok` | Every stage completed. |
 | `partial` | Loaded, but a stage degraded. Still a real measurement. |
 | `bot-blocked` | The site served a wall. Structural columns describe the **wall**, not the site; the score is blank. |
+| `robots-disallowed` | `robots.txt` said no and `--respect-robots` was on. Nothing was fetched; every measured column is blank. |
 | `unreachable` | Never loaded. Every measured column is blank. |
 
 A failed site is emitted as a row rather than skipped, so "12% of the list
@@ -74,6 +76,33 @@ than it sounds: the scorer rates a page that never loaded **100 on friction**,
 because a document with no elements has no traps in it. Left in the table, every
 dead host would rank among the best sites in the corpus and quietly pull any
 average with it.
+
+### robots.txt
+
+`--respect-robots` is off by default, so local fixtures and your own staging box
+audit unblocked. Turn it on for a corpus run over sites that did not ask to be
+measured.
+
+The check runs on a plain HTTP fetch **before Chromium launches** — the point of
+respecting robots is to not make the request, and a check after navigation has
+already made it. It also runs after the SSRF guard, since the probe is itself an
+outbound request to a caller-supplied host.
+
+Two behaviours worth knowing:
+
+- **A group naming `AgentGrade` overrides `*`.** That is the Robots Exclusion
+  Protocol's rule — a crawler obeys the most specific group matching it — and it
+  is what a site owner means by writing a group addressed to this scanner. A
+  file with `User-agent: * / Disallow: /` plus `User-agent: AgentGrade /
+  Allow: /` is read as a grant, not a refusal.
+- **A fetch that fails means allowed.** A 404 is the ordinary case for a site
+  with no `robots.txt`, and a 5xx or a dead connection is a fact about the
+  network rather than a prohibition. Only a served, parsed, matching `Disallow`
+  stops a scan — otherwise one flaky DNS answer could quietly empty a corpus.
+
+Path matching supports `*` and `$`, and resolves an `Allow`/`Disallow` conflict
+by longest match with `Allow` taking a tie, so the common `Disallow: /` plus
+`Allow: /public` pairing works as written.
 
 ## Exit codes
 

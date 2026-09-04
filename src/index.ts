@@ -12,6 +12,18 @@ import { runSyntheticEvaluation } from './evals/synthetic-agent.js';
 import { scoreAudit } from './evals/scorer.js';
 import type { AgentScorecard, ScoringOptions } from './evals/types.js';
 
+export {
+  ROBOTS_USER_AGENT,
+  checkRobots,
+  groupFor,
+  isPathAllowed,
+  matchLength,
+  parseRobots,
+  type RobotsFetcher,
+  type RobotsGroup,
+  type RobotsTxt,
+  type RobotsVerdict,
+} from './lib/robots.js';
 export * from './scanner/index.js';
 export * from './evals/index.js';
 // The code generator is pure (type-only imports), so it is safe for any

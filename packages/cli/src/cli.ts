@@ -75,6 +75,7 @@ export interface ParsedArgs {
   noSandbox: boolean;
   bypassCsp: boolean;
   ignoreHttpsErrors: boolean;
+  respectRobots: boolean;
   quiet: boolean;
   maxIssues: number | null;
   color: boolean | null;
@@ -121,6 +122,10 @@ SCAN-CORPUS OPTIONS
   --timeout <ms>         Per-site budget. Default ${DEFAULT_SITE_TIMEOUT_MS}.
   --out <path>           Write to a file. A .json extension emits JSON, anything
                          else CSV. Omit to write CSV to stdout.
+  --respect-robots       Check /robots.txt before launching a browser and skip
+                         a target that disallows it, as robots-disallowed. Off
+                         by default so local fixtures and your own staging box
+                         audit unblocked. Accepted on audit too.
 
 EXIT CODES
   0  score met the threshold
@@ -159,6 +164,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     noSandbox: false,
     bypassCsp: false,
     ignoreHttpsErrors: false,
+    respectRobots: false,
     quiet: false,
     maxIssues: null,
     color: null,
@@ -262,6 +268,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
         break;
       case '--ignore-https-errors':
         parsed.ignoreHttpsErrors = true;
+        break;
+      case '--respect-robots':
+        parsed.respectRobots = true;
         break;
       case '--no-color':
         parsed.color = false;
@@ -388,6 +397,7 @@ export async function main(argv: string[], io: CliIo = defaultIo): Promise<numbe
       ...(args.noSandbox ? { disableSandbox: true } : {}),
       ...(args.bypassCsp ? { bypassCsp: true } : {}),
       ...(args.ignoreHttpsErrors ? { ignoreHttpsErrors: true } : {}),
+      ...(args.respectRobots ? { respectRobots: true } : {}),
       onProgress,
     });
   } catch (error) {
@@ -461,6 +471,7 @@ const STATUS_STYLE: Record<string, StyleName> = {
   ok: 'brightGreen',
   partial: 'brightYellow',
   'bot-blocked': 'magenta',
+  'robots-disallowed': 'blue',
   unreachable: 'brightRed',
 };
 
@@ -496,7 +507,13 @@ async function runCorpusCommand(args: ParsedArgs, io: CliIo, style: Style): Prom
     return EXIT_CODES.usage;
   }
 
-  const counts: Record<string, number> = { ok: 0, partial: 0, 'bot-blocked': 0, unreachable: 0 };
+  const counts: Record<string, number> = {
+    ok: 0,
+    partial: 0,
+    'bot-blocked': 0,
+    'robots-disallowed': 0,
+    unreachable: 0,
+  };
   const startedAt = Date.now();
 
   const options: CorpusOptions = {
@@ -510,6 +527,7 @@ async function runCorpusCommand(args: ParsedArgs, io: CliIo, style: Style): Prom
       ...(args.noSandbox ? { disableSandbox: true } : {}),
       ...(args.bypassCsp ? { bypassCsp: true } : {}),
       ...(args.ignoreHttpsErrors ? { ignoreHttpsErrors: true } : {}),
+      ...(args.respectRobots ? { respectRobots: true } : {}),
     },
   };
 
