@@ -68,4 +68,17 @@ export {
   type SurfaceCoverage,
   type ToolKind,
 } from './analysis.js';
+export {
+  CORPUS_COLUMNS,
+  classifyScan,
+  csvField,
+  csvHeader,
+  csvRow,
+  domainOf,
+  toCorpusRow,
+  toCsv,
+  toFailedRow,
+  type CorpusRow,
+  type CorpusStatus,
+} from './corpus.js';
 export * from './types.js';

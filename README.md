@@ -68,7 +68,7 @@ npm install
 npx playwright install chromium
 
 npm run dev        # studio at http://localhost:3000
-npm test           # 241 tests, real Chromium against a loopback fixture
+npm test           # 282 tests, real Chromium against a loopback fixture
 npm run build:all  # engine → CLI → React SDK → studio
 ```
 
@@ -148,6 +148,21 @@ Exit `0` at or above the threshold, `1` below it, `2` on a usage error, `3` when
 the target could not be scanned — so a red build tells you whether the site
 regressed or the deployment was down. Full options in
 [`packages/cli/README.md`](packages/cli/README.md).
+
+### Corpus scanning
+
+```bash
+agentgrade scan-corpus sites.txt --out corpus.csv
+```
+
+Scans a list of sites and emits one CSV row each — score, the four pillar
+sub-scores, structural metrics (DOM nodes, unlabelled inputs, non-semantic
+clickables, iframes, traps), WebMCP signals, and the economic model. Progress
+goes to stderr, so `scan-corpus sites.txt > corpus.csv` produces a clean table.
+
+A single audit answers "is this site ready?". A corpus answers whether the score
+*discriminates* — if every site lands in the same band, the metric is not
+measuring anything. Details in [`packages/cli/README.md`](packages/cli/README.md).
 
 ### CI/CD
 
@@ -458,7 +473,7 @@ A soft navigation timeout that still rendered usable DOM is inspected anyway.
 ```bash
 npm install
 npm run typecheck
-npm test            # 241 tests, real Chromium against a loopback fixture server
+npm test            # 282 tests, real Chromium against a loopback fixture server
 npm run build       # engine (tsc → dist/)
 npm run build:cli   # @agentgrade/cli (esbuild bundle)
 npm run build:react # @agentgrade/react (tsc → declarations)
